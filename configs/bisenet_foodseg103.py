@@ -1,5 +1,6 @@
 from pathlib import Path
 import torch
+import os
 
 CFG = {
 
@@ -25,11 +26,12 @@ CFG = {
     # This mirrors the FoodSeg103 benchmark repository behavior.
     # ---------------------------------------------------------------------
     # "data_root": "/content/data/FoodSeg103",
-    "data_root": "../../dataset/foodseg103-full",
-    "train_img_dir": "train",
-    "train_mask_dir": "train/img",
-    "test_img_dir": "test",
-    "test_mask_dir": "test/ann",
+    # "data_root": "../../dataset/foodseg103-full",
+    "data_root": os.getenv("DATA_ROOT", "../../dataset/foodseg103-full"),
+    "train_img_dir": "train/img",
+    "train_mask_dir": "train/mask",
+    "test_img_dir": "test/img",
+    "test_mask_dir": "test/mask",
     "num_classes": 104,
     "ignore_index": 255,
     "background_id": 103, #!!!!!!!!! FoodSeg103 has 103 foreground classes + 1 background class (id=103)
@@ -38,7 +40,8 @@ CFG = {
     # ---------------------------------------------------------------------
     # Checkpoint / logging
     # ---------------------------------------------------------------------
-    "work_dir": "/content/drive/MyDrive/[PROJECT][COMPUTER-VISION]/bisenet_foodseg103_benchmark",
+    # "work_dir": "/content/drive/MyDrive/[PROJECT][COMPUTER-VISION]/bisenet_foodseg103_benchmark",
+    "work_dir": os.getenv("WORK_DIR", "./work_dirs/bisenet_foodseg103"),
     "resume": True,
     "save_last_name": "last.pth",
     "save_best_name": "best_miou.pth",

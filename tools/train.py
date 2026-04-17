@@ -52,13 +52,43 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run evaluation only without training.",
     )
+    parser.add_argument(
+        "--data-root",
+        type=str,
+        default=None,
+        help="Override static dataset path.",
+    )
+    parser.add_argument(
+        "--work-dir",
+        type=str,
+        default=None,
+        help="Override static checkpoint directory.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Override global batch size.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Override total training epochs.",
+    )
+    parser.add_argument(
+        "--overfit",
+        type=int,
+        default=0,
+        help="Number of samples for overfitting. 0 indicates full dataset training.",
+    )
     return parser.parse_args()
 
 
 # =============================================================================
 # Runtime config / path helpers
 # =============================================================================
-def get_runtime_cfg() -> Dict[str, Any]:
+def get_runtime_cfg(args: argparse.Namespace) -> Dict[str, Any]:
     """
     Create a runtime copy of global config.
 
@@ -69,7 +99,20 @@ def get_runtime_cfg() -> Dict[str, Any]:
     Dict[str, Any]
         Runtime configuration dictionary.
     """
-    return CFG.copy()
+    cfg = CFG.copy()
+    
+    if args.data_root:
+        cfg["data_root"] = args.data_root
+    if args.work_dir:
+        cfg["work_dir"] = args.work_dir
+    if args.batch_size:
+        cfg["batch_size"] = args.batch_size
+    if args.epochs:
+        cfg["epochs"] = args.epochs
+        
+    cfg["overfit_samples"] = args.overfit
+    
+    return cfg
 
 
 def get_runtime_paths(cfg: Dict[str, Any]) -> Dict[str, Path]:
@@ -170,6 +213,14 @@ def build_datasets(
     train_samples = build_samples(paths["train_img_dir"], paths["train_mask_dir"])
     test_samples = build_samples(paths["test_img_dir"], paths["test_mask_dir"])
 
+    overfit_n = cfg.get("overfit_samples", 0)
+    if overfit_n > 0:
+        print("=" * 80)
+        print(f"OVERFIT MODE ENABLED: Allocating {overfit_n} samples for debugging.")
+        print("=" * 80)
+        train_samples = train_samples[:overfit_n]
+        test_samples = train_samples
+
     train_tf, eval_tf = build_transforms(cfg)
 
     train_ds = FoodSegDataset(train_samples, train_tf)
@@ -224,6 +275,7 @@ def build_loaders(
 # =============================================================================
 def build_model_and_optim(
     cfg: Dict[str, Any],
+    paths: Dict[str, Path],
 ) -> Tuple[nn.Module, nn.Module, torch.optim.Optimizer, torch.cuda.amp.GradScaler]:
     """
     Build model, criterion, optimizer, and AMP scaler.
@@ -232,6 +284,9 @@ def build_model_and_optim(
     ----------
     cfg : Dict[str, Any]
         Runtime configuration.
+        
+    paths : Dict[str, Path]
+        Resolved filesystem paths mapping.
 
     Returns
     -------
@@ -657,7 +712,7 @@ def main() -> None:
     # -------------------------------------------------------------
     # Runtime config and paths
     # -------------------------------------------------------------
-    cfg = get_runtime_cfg()
+    cfg = get_runtime_cfg(args)
     paths = get_runtime_paths(cfg)
 
     # -------------------------------------------------------------
@@ -680,7 +735,7 @@ def main() -> None:
     # -------------------------------------------------------------
     # Model / loss / optimizer / scaler
     # -------------------------------------------------------------
-    model, criterion, optimizer, scaler = build_model_and_optim(cfg)
+    model, criterion, optimizer, scaler = build_model_and_optim(cfg, paths)
 
     # -------------------------------------------------------------
     # Eval-only mode
