@@ -7,7 +7,9 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import functional as TF
-
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+import cv2
 
 # ---------------------------------------------------------------------
 # Type aliases
@@ -18,7 +20,39 @@ from torchvision.transforms import functional as TF
 # - stem chung của file
 Sample = Tuple[str, str, str]
 
+class AlbuTrainTransform:
+    def __init__(self, size=512, ignore_index=255):
+        self.transform = A.Compose([
+            # 1. Resize ảnh to hơn một chút để chừa không gian crop
+            A.SmallestMaxSize(max_size=size + 64, interpolation=cv2.INTER_LINEAR),
+            
+            # 2. Crop tập trung vào Foreground (Đồ ăn) - Bỏ qua Background (0)
+            A.CropNonEmptyMaskIfExists(
+                height=size, 
+                width=size, 
+                ignore_values=[0, ignore_index], # Bỏ qua nền và nhãn rỗng
+                p=1.0
+            ),
+            
+            # 3. Augmentation cơ bản
+            A.HorizontalFlip(p=0.5),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, p=0.5),
+            
+            A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+            ToTensorV2()
+        ])
 
+    def __call__(self, img, mask):
+        # Albumentations yêu cầu input là numpy array (thường là HxWxC)
+        # Nếu img, mask của bạn đang là PIL Image thì convert qua numpy
+        img_np = np.array(img)
+        mask_np = np.array(mask)
+        
+        # Chạy Augmentation
+        augmented = self.transform(image=img_np, mask=mask_np)
+        
+        # Trả về tensor (C, H, W) cho img và (H, W) cho mask
+        return augmented['image'], augmented['mask'].long()
 # ---------------------------------------------------------------------
 # Supported image extensions
 # ---------------------------------------------------------------------
@@ -50,46 +84,6 @@ def set_seed_for_worker(worker_id: int) -> None:
 
 
 class RandomResizeCrop:
-    """
-    Transform dùng cho train:
-    - random resize theo scale range
-    - random horizontal flip
-    - pad nếu ảnh nhỏ hơn crop size
-    - random crop về kích thước cố định
-    - convert sang tensor + normalize
-    - chuẩn hóa mask và gán ignore_index cho label không hợp lệ
-
-    Đây là transform train kiểu segmentation cơ bản, bám sát tinh thần:
-    - random scale
-    - random horizontal flip
-    - random crop
-
-    Parameters
-    ----------
-    out_size : Tuple[int, int]
-        Kích thước đầu ra cuối cùng sau crop, theo dạng (height, width).
-
-    scale_range : Tuple[float, float]
-        Khoảng scale ngẫu nhiên để resize ảnh trước khi crop.
-        Ví dụ: (0.5, 2.0).
-
-    hflip_prob : float
-        Xác suất lật ngang ảnh và mask.
-
-    mean : List[float] | Tuple[float, float, float]
-        Mean dùng để normalize ảnh RGB.
-
-    std : List[float] | Tuple[float, float, float]
-        Std dùng để normalize ảnh RGB.
-
-    ignore_index : int
-        Giá trị dùng để đánh dấu pixel mask không hợp lệ / bị ignore.
-
-    num_classes : int
-        Tổng số class hợp lệ trong bài toán segmentation.
-        Pixel nào ngoài [0, num_classes - 1] sẽ bị gán ignore_index.
-    """
-
     def __init__(
         self,
         out_size,
@@ -99,6 +93,7 @@ class RandomResizeCrop:
         std,
         ignore_index,
         num_classes,
+        base_size=(1024, 2048), # Chuẩn Paper: (Height, Width)
     ):
         self.out_h, self.out_w = out_size
         self.scale_range = scale_range
@@ -107,94 +102,44 @@ class RandomResizeCrop:
         self.std = std
         self.ignore_index = ignore_index
         self.num_classes = num_classes
+        self.base_h, self.base_w = base_size
 
     def __call__(self, image: Image.Image, mask: Image.Image):
-        """
-        Áp dụng toàn bộ pipeline augmentation/train preprocessing.
+        # 1) Resize về kích thước cơ sở (Base Resize) trước khi scale
+        image = image.resize((self.base_w, self.base_h), Image.BILINEAR)
+        mask = mask.resize((self.base_w, self.base_h), Image.NEAREST)
 
-        Parameters
-        ----------
-        image : PIL.Image.Image
-            Ảnh RGB đầu vào.
-
-        mask : PIL.Image.Image
-            Mask phân đoạn đầu vào. Giá trị pixel là class id.
-
-        Returns
-        -------
-        image : torch.Tensor
-            Tensor ảnh đã normalize, shape [3, H, W].
-
-        mask : torch.Tensor
-            Tensor mask kiểu int64, shape [H, W].
-            Các pixel không hợp lệ được gán `ignore_index`.
-        """
-        # -------------------------------------------------------------
-        # 1) Random resize
-        # -------------------------------------------------------------
-        # Chọn ngẫu nhiên một scale ratio trong khoảng cấu hình.
+        # 2) Random scale dựa trên kích thước cơ sở
         w, h = image.size
         ratio = random.uniform(self.scale_range[0], self.scale_range[1])
+        new_w = int(round(w * ratio))
+        new_h = int(round(h * ratio))
 
-        # Bảo đảm chiều mới không quá nhỏ để tránh lỗi crop / tensor rỗng.
-        new_w = max(32, int(round(w * ratio)))
-        new_h = max(32, int(round(h * ratio)))
-
-        # Ảnh dùng bilinear để nội suy mượt.
-        # Mask dùng nearest để không sinh class id lạ.
         image = image.resize((new_w, new_h), Image.BILINEAR)
         mask = mask.resize((new_w, new_h), Image.NEAREST)
 
-        # -------------------------------------------------------------
-        # 2) Random horizontal flip
-        # -------------------------------------------------------------
+        # 3) Random horizontal flip
         if random.random() < self.hflip_prob:
             image = TF.hflip(image)
             mask = TF.hflip(mask)
 
-        # -------------------------------------------------------------
-        # 3) Pad nếu ảnh nhỏ hơn crop size
-        # -------------------------------------------------------------
-        # Sau random scale, ảnh có thể nhỏ hơn kích thước crop mong muốn.
-        # Khi đó cần pad để crop luôn hợp lệ.
+        # 4) Pad nếu scale ratio nhỏ hơn kích thước crop mong muốn
         pad_w = max(0, self.out_w - new_w)
         pad_h = max(0, self.out_h - new_h)
-
         if pad_w > 0 or pad_h > 0:
-            # Ảnh pad bằng 0 (đen).
             image = TF.pad(image, [0, 0, pad_w, pad_h], fill=0)
-
-            # Mask pad bằng ignore_index để vùng pad không ảnh hưởng loss/metric.
             mask = TF.pad(mask, [0, 0, pad_w, pad_h], fill=self.ignore_index)
 
-        # -------------------------------------------------------------
-        # 4) Random crop về kích thước cố định
-        # -------------------------------------------------------------
-        # Vì ảnh lúc này chắc chắn đã >= crop size, ta chọn ngẫu nhiên góc trái trên.
-        max_top = max(1, image.height - self.out_h + 1)
-        max_left = max(1, image.width - self.out_w + 1)
-
-        i = torch.randint(0, max_top, (1,)).item()
-        j = torch.randint(0, max_left, (1,)).item()
-
-        h_crop = self.out_h
-        w_crop = self.out_w
-
+        # 5) Random crop về out_size
+        i, j, h_crop, w_crop = T.RandomCrop.get_params(image, output_size=(self.out_h, self.out_w))
         image = TF.crop(image, i, j, h_crop, w_crop)
         mask = TF.crop(mask, i, j, h_crop, w_crop)
 
-        # -------------------------------------------------------------
-        # 5) Convert image sang tensor + normalize
-        # -------------------------------------------------------------
+        # 6) Normalize và chuyển đổi Tensor
         image = TF.to_tensor(image)
         image = TF.normalize(image, self.mean, self.std)
-
-        # -------------------------------------------------------------
-        # 6) Convert mask sang tensor int64
-        # -------------------------------------------------------------
         mask = torch.from_numpy(np.array(mask, dtype=np.int64))
-
-        # Mọi label ngoài range hợp lệ đều bị đưa về ignore_index.
+        
         invalid = (mask < 0) | (mask >= self.num_classes)
         mask[invalid] = self.ignore_index
 

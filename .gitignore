@@ -1,0 +1,30 @@
+# Output PDF
+main.pdf
+datasets/foodseg103-full
+work_dirs
+
+# --- Model weights & training artifacts ---
+models/pretrain
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+checkpoints/
+runs/
+wandb/
+lightning_logs/
+.mlflow/
+
+# --- Python / notebooks ---
+__pycache__/
+*.py[cod]
+.Python
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# --- OS / IDE ---
+.DS_Store
+Thumbs.db

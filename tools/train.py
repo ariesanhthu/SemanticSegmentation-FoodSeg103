@@ -2,13 +2,13 @@ from pathlib import Path
 import argparse
 import sys
 from typing import Any, Dict, Tuple
-
+import csv
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from models.builder import build_model
-
+from loss import CombinedLoss
 
 # =============================================================================
 # Project import setup
@@ -22,6 +22,7 @@ from configs.bisenet_foodseg103 import CFG, get_paths
 from datasets.foodseg103 import (
     FoodSegDataset,
     RandomResizeCrop,
+    AlbuTrainTransform,
     EvalTransform,
     build_samples,
     set_seed_for_worker,
@@ -141,7 +142,8 @@ def get_runtime_paths(cfg: Dict[str, Any]) -> Dict[str, Path]:
 # =============================================================================
 # Data preparation
 # =============================================================================
-def build_transforms(cfg: Dict[str, Any]) -> Tuple[RandomResizeCrop, EvalTransform]:
+# def build_transforms(cfg: Dict[str, Any]) -> Tuple[RandomResizeCrop, EvalTransform]:
+def build_transforms(cfg: Dict[str, Any]) -> Tuple[Any, EvalTransform]:
     """
     Build train and evaluation transforms.
 
@@ -166,15 +168,22 @@ def build_transforms(cfg: Dict[str, Any]) -> Tuple[RandomResizeCrop, EvalTransfo
     Tuple[RandomResizeCrop, EvalTransform]
         (train_transform, eval_transform)
     """
-    train_tf = RandomResizeCrop(
-        out_size=cfg["train_size"],
-        scale_range=cfg["scale_range"],
-        hflip_prob=cfg["hflip_prob"],
-        mean=cfg["imagenet_mean"],
-        std=cfg["imagenet_std"],
+    out_size = cfg["train_size"][0] if isinstance(cfg["train_size"], (list, tuple)) else cfg["train_size"]
+    
+    train_tf = AlbuCropTransform(
+        size=out_size,
         ignore_index=cfg["ignore_index"],
-        num_classes=cfg["num_classes"],
+        background_id=cfg["background_id"]
     )
+    # train_tf = RandomResizeCrop(
+    #     out_size=cfg["train_size"],
+    #     scale_range=cfg["scale_range"],
+    #     hflip_prob=cfg["hflip_prob"],
+    #     mean=cfg["imagenet_mean"],
+    #     std=cfg["imagenet_std"],
+    #     ignore_index=cfg["ignore_index"],
+    #     num_classes=cfg["num_classes"],
+    # )
 
     eval_tf = EvalTransform(
         mean=cfg["imagenet_mean"],
@@ -295,8 +304,15 @@ def build_model_and_optim(
     """
     model = build_model(cfg, paths).to(cfg["device"])
 
-    criterion = nn.CrossEntropyLoss(ignore_index=cfg["ignore_index"])
-
+    # criterion = nn.CrossEntropyLoss(ignore_index=cfg["ignore_index"])
+    criterion = CombinedLoss(
+            num_classes=cfg.get("num_classes", 104),
+            ignore_index=cfg["ignore_index"],
+            ce_weight=1.0,
+            dice_weight=1.0,
+            bg_weight=0.1
+        )
+    criterion.ce.weight = criterion.ce.weight.to(cfg["device"])
     optimizer = torch.optim.SGD(
         model.parameters(),
         lr=cfg["lr"],
@@ -625,6 +641,8 @@ def run_training(
     last_path = paths["work_dir"] / cfg["save_last_name"]
     best_path = paths["work_dir"] / cfg["save_best_name"]
 
+    csv_path = paths["work_dir"] / "metrics.csv" # Đường dẫn file CSV
+
     start_epoch, global_iter, best_miou = maybe_resume(
         cfg=cfg,
         last_path=last_path,
@@ -632,6 +650,12 @@ def run_training(
         optimizer=optimizer,
         scaler=scaler,
     )
+
+    if start_epoch == 0:
+        ensure_dir(paths["work_dir"])
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['epoch', 'train_loss', 'val_loss', 'mIoU', 'mAcc', 'aAcc'])
 
     max_iter = max(1, cfg["epochs"] * len(train_loader))
 
@@ -653,19 +677,26 @@ def run_training(
         # -------------------------------------------------------------
         # Periodic evaluation on benchmark eval/test split
         # -------------------------------------------------------------
+        # Giá trị mặc định cho metrics nếu không chạy evaluation trong epoch hiện tại
+        val_loss, miou, macc, aacc = -1.0, -1.0, -1.0, -1.0
+
         if (epoch + 1) % cfg["eval_every"] == 0:
             scores = evaluate(model, eval_loader, cfg, criterion)
+            val_loss = scores['loss']
+            miou = scores['mIoU']
+            macc = scores['mAcc']
+            aacc = scores['aAcc']
 
             print(
                 f"Eval {epoch:03d} | "
-                f"loss={scores['loss']:.4f} | "
-                f"mIoU={scores['mIoU']:.4f} | "
-                f"mAcc={scores['mAcc']:.4f} | "
-                f"aAcc={scores['aAcc']:.4f}"
+                f"loss={val_loss:.4f} | "
+                f"mIoU={miou:.4f} | "
+                f"mAcc={macc:.4f} | "
+                f"aAcc={aacc:.4f}"
             )
 
-            if scores["mIoU"] > best_miou:
-                best_miou = scores["mIoU"]
+            if miou > best_miou:
+                best_miou = miou
                 save_checkpoint(
                     best_path,
                     epoch,
@@ -677,6 +708,11 @@ def run_training(
                     cfg,
                 )
                 print(f"Saved new best checkpoint to {best_path}")
+
+        # Ghi lại kết quả vào tệp CSV (Lưu trên Drive thông qua work_dir)
+        with open(csv_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch, train_loss, val_loss, miou, macc, aacc])
 
         # Save last checkpoint every epoch
         save_checkpoint(

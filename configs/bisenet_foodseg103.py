@@ -1,7 +1,8 @@
 from pathlib import Path
 import torch
 import os
-
+# in ra path hiện tại root
+# print(f"Current working directory: {os.getcwd()}")
 CFG = {
 
 # ---------------------------------------------------------------------
@@ -25,9 +26,7 @@ CFG = {
     #   - test split : official test
     # This mirrors the FoodSeg103 benchmark repository behavior.
     # ---------------------------------------------------------------------
-    # "data_root": "/content/data/FoodSeg103",
-    # "data_root": "../../dataset/foodseg103-full",
-    "data_root": os.getenv("DATA_ROOT", "../../dataset/foodseg103-full"),
+    "data_root": os.getenv("DATA_ROOT", "datasets/foodseg103-full"),
     "train_img_dir": "train/img",
     "train_mask_dir": "train/mask",
     "test_img_dir": "test/img",
@@ -41,7 +40,7 @@ CFG = {
     # Checkpoint / logging
     # ---------------------------------------------------------------------
     # "work_dir": "/content/drive/MyDrive/[PROJECT][COMPUTER-VISION]/bisenet_foodseg103_benchmark",
-    "work_dir": os.getenv("WORK_DIR", "./work_dirs/bisenet_foodseg103"),
+    "work_dir": os.getenv("WORK_DIR", "./work_dirs/bisenet_v3"),
     "resume": True,
     "save_last_name": "last.pth",
     "save_best_name": "best_miou.pth",
@@ -65,8 +64,8 @@ CFG = {
     #   - crop size : 512 x 1024 (FoodSeg103 baseline table)
     # ---------------------------------------------------------------------
     # Dựa theo thống kê mean_height = 584.47, mean_width = 703.62, median_height = 384, median_width = 512 
-    "train_size": (384, 512),  
-    "test_size": None,          # None = evaluate at original image size
+    "train_size": (768, 768),  
+    "test_size": (1024, 2048),          # None = evaluate at original image size
     "scale_range": (0.5, 2.0),
     "hflip_prob": 0.5,
     "imagenet_mean": [0.485, 0.456, 0.406],
@@ -88,9 +87,9 @@ CFG = {
     #   initial lr = 2.5e-2
     # ---------------------------------------------------------------------
     "epochs": 80,
-    "lr": 2.5e-2,
+    "lr": 1e-3,
     "momentum": 0.9,
-    "weight_decay": 1e-4,
+    "weight_decay": 0.0005,
     "poly_power": 0.9,
     "aux_weight": 1.0,
     "grad_clip_norm": None,
