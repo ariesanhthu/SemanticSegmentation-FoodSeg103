@@ -7,8 +7,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
-from models.builder import build_model
-from loss import CombinedLoss
+# Project imports are added after ROOT is appended to sys.path below.
 
 # =============================================================================
 # Project import setup
@@ -18,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT))
 
 
+from models.builder import build_model
+from tools.loss import CombinedLoss
 from configs.bisenet_foodseg103 import CFG, get_paths
 from datasets.foodseg103 import (
     FoodSegDataset,
@@ -27,7 +28,6 @@ from datasets.foodseg103 import (
     build_samples,
     set_seed_for_worker,
 )
-from models.bisenetv1 import BiSeNetV1
 from utils.metrics import fast_hist, compute_segmentation_scores
 from utils.misc import seed_everything, ensure_dir, load_checkpoint, save_checkpoint
 
@@ -106,9 +106,9 @@ def get_runtime_cfg(args: argparse.Namespace) -> Dict[str, Any]:
         cfg["data_root"] = args.data_root
     if args.work_dir:
         cfg["work_dir"] = args.work_dir
-    if args.batch_size:
+    if args.batch_size is not None:
         cfg["batch_size"] = args.batch_size
-    if args.epochs:
+    if args.epochs is not None:
         cfg["epochs"] = args.epochs
         
     cfg["overfit_samples"] = args.overfit

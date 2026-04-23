@@ -31,7 +31,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=str, default=None, help="Override dataset root.")
     parser.add_argument("--work-dir", type=str, default=None, help="Override work directory.")
     parser.add_argument("--max-iters", type=int, default=None, help="Override max training iterations.")
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Convenience override. If set, max_iters = epochs * len(train_loader).",
+    )
     parser.add_argument("--batch-size", type=int, default=None, help="Override train batch size.")
+    parser.add_argument(
+        "--overfit",
+        type=int,
+        default=0,
+        help="Use the first N train samples for debugging and evaluate on the same subset.",
+    )
     parser.add_argument("--eval-only", action="store_true", help="Only run evaluation.")
     return parser.parse_args()
 
@@ -44,8 +56,11 @@ def get_runtime_cfg(args: argparse.Namespace) -> Dict[str, object]:
         cfg["work_dir"] = args.work_dir
     if args.max_iters is not None:
         cfg["max_iters"] = args.max_iters
+    if args.epochs is not None and args.max_iters is None:
+        cfg["epochs"] = args.epochs
     if args.batch_size is not None:
         cfg["batch_size"] = args.batch_size
+    cfg["overfit_samples"] = max(0, int(args.overfit))
     return resolve_dataset_meta(cfg)
 
 
@@ -53,6 +68,14 @@ def build_loaders(cfg: Dict[str, object]) -> Tuple[DataLoader, DataLoader]:
     paths = get_paths(cfg)
     train_samples = build_samples(paths["train_img_dir"], paths["train_mask_dir"])
     test_samples = build_samples(paths["test_img_dir"], paths["test_mask_dir"])
+
+    overfit_samples = int(cfg.get("overfit_samples", 0))
+    if overfit_samples > 0:
+        print("=" * 80)
+        print(f"OVERFIT MODE ENABLED: using first {overfit_samples} train samples.")
+        print("=" * 80)
+        train_samples = train_samples[:overfit_samples]
+        test_samples = train_samples.copy()
 
     train_tf = RandomResizeCrop(
         out_size=cfg["train_size"],
@@ -82,7 +105,7 @@ def build_loaders(cfg: Dict[str, object]) -> Tuple[DataLoader, DataLoader]:
         shuffle=True,
         num_workers=cfg["num_workers"],
         pin_memory=cfg["pin_memory"],
-        drop_last=cfg["drop_last"],
+        drop_last=bool(cfg["drop_last"]) and len(train_samples) >= int(cfg["batch_size"]),
         worker_init_fn=set_seed_for_worker,
     )
 
@@ -198,6 +221,13 @@ def run_training(cfg: Dict[str, object]) -> None:
     train_loader, eval_loader = build_loaders(cfg)
     if len(train_loader) == 0:
         raise RuntimeError("Train loader is empty.")
+
+    if cfg.get("epochs") is not None:
+        cfg["max_iters"] = max(1, int(cfg["epochs"]) * len(train_loader))
+        print(
+            f"Resolved max_iters from epochs: epochs={cfg['epochs']} "
+            f"x iters_per_epoch={len(train_loader)} -> max_iters={cfg['max_iters']}"
+        )
 
     last_path = paths["work_dir"] / cfg["save_last_name"]
     best_path = paths["work_dir"] / cfg["save_best_name"]
