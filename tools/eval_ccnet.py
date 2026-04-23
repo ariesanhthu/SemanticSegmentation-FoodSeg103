@@ -81,7 +81,11 @@ def main() -> None:
     seed_everything(cfg["seed"])
 
     paths = get_paths(cfg)
-    samples = build_samples(paths["test_img_dir"], paths["test_mask_dir"])
+    samples = build_samples(
+        paths["test_img_dir"],
+        paths["test_mask_dir"],
+        validate_files=bool(cfg.get("validate_samples", True)),
+    )
 
     transform = EvalTransform(
         mean=cfg["imagenet_mean"],
@@ -91,7 +95,11 @@ def main() -> None:
         out_size=cfg["eval_size"],
     )
     loader = DataLoader(
-        FoodSegDataset(samples, transform),
+        FoodSegDataset(
+            samples,
+            transform,
+            max_decode_retries=int(cfg.get("max_decode_retries", 16)),
+        ),
         batch_size=1 if cfg["eval_size"] is None else cfg["eval_batch_size"],
         shuffle=False,
         num_workers=cfg["num_workers"],

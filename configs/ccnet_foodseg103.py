@@ -27,6 +27,8 @@ CFG = {
     "num_classes": 104,
     "ignore_index": 255,
     "image_exts": [".jpg", ".jpeg", ".png", ".bmp", ".webp"],
+    "validate_samples": True,
+    "max_decode_retries": 16,
 
     # ------------------------------------------------------------------
     # Model: CCNet baseline with ResNet-50 output_stride=8

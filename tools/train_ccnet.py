@@ -1,4 +1,5 @@
 import argparse
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import sys
@@ -64,10 +65,34 @@ def get_runtime_cfg(args: argparse.Namespace) -> Dict[str, object]:
     return resolve_dataset_meta(cfg)
 
 
+def make_grad_scaler(device: str, enabled: bool):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+        return torch.amp.GradScaler(device_type, enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def autocast_context(device: str, enabled: bool):
+    if not enabled:
+        return nullcontext()
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        device_type = "cuda" if str(device).startswith("cuda") else "cpu"
+        return torch.amp.autocast(device_type=device_type, enabled=True)
+    return torch.cuda.amp.autocast(enabled=True)
+
+
 def build_loaders(cfg: Dict[str, object]) -> Tuple[DataLoader, DataLoader]:
     paths = get_paths(cfg)
-    train_samples = build_samples(paths["train_img_dir"], paths["train_mask_dir"])
-    test_samples = build_samples(paths["test_img_dir"], paths["test_mask_dir"])
+    train_samples = build_samples(
+        paths["train_img_dir"],
+        paths["train_mask_dir"],
+        validate_files=bool(cfg.get("validate_samples", True)),
+    )
+    test_samples = build_samples(
+        paths["test_img_dir"],
+        paths["test_mask_dir"],
+        validate_files=bool(cfg.get("validate_samples", True)),
+    )
 
     overfit_samples = int(cfg.get("overfit_samples", 0))
     if overfit_samples > 0:
@@ -100,7 +125,11 @@ def build_loaders(cfg: Dict[str, object]) -> Tuple[DataLoader, DataLoader]:
     )
 
     train_loader = DataLoader(
-        FoodSegDataset(train_samples, train_tf),
+        FoodSegDataset(
+            train_samples,
+            train_tf,
+            max_decode_retries=int(cfg.get("max_decode_retries", 16)),
+        ),
         batch_size=cfg["batch_size"],
         shuffle=True,
         num_workers=cfg["num_workers"],
@@ -114,7 +143,11 @@ def build_loaders(cfg: Dict[str, object]) -> Tuple[DataLoader, DataLoader]:
         eval_batch_size = 1
 
     eval_loader = DataLoader(
-        FoodSegDataset(test_samples, eval_tf),
+        FoodSegDataset(
+            test_samples,
+            eval_tf,
+            max_decode_retries=int(cfg.get("max_decode_retries", 16)),
+        ),
         batch_size=eval_batch_size,
         shuffle=False,
         num_workers=cfg["num_workers"],
@@ -243,9 +276,8 @@ def run_training(cfg: Dict[str, object]) -> None:
         momentum=cfg["momentum"],
         weight_decay=cfg["weight_decay"],
     )
-    scaler = torch.cuda.amp.GradScaler(
-        enabled=bool(cfg["amp"]) and str(cfg["device"]).startswith("cuda")
-    )
+    amp_enabled = bool(cfg["amp"]) and str(cfg["device"]).startswith("cuda")
+    scaler = make_grad_scaler(cfg["device"], enabled=amp_enabled)
 
     global_iter, best_miou = maybe_resume(cfg, model, optimizer, scaler, last_path)
 
@@ -281,9 +313,7 @@ def run_training(cfg: Dict[str, object]) -> None:
         model.train()
         optimizer.zero_grad(set_to_none=True)
 
-        with torch.cuda.amp.autocast(
-            enabled=bool(cfg["amp"]) and str(cfg["device"]).startswith("cuda")
-        ):
+        with autocast_context(cfg["device"], enabled=amp_enabled):
             outputs = model(images)
             if isinstance(outputs, tuple):
                 logits, aux_logits = outputs

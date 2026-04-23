@@ -1,10 +1,11 @@
 import json
 import random
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFile, UnidentifiedImageError
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as T
@@ -14,6 +15,28 @@ from torchvision.transforms import functional as TF
 
 Sample = Tuple[str, str, str]
 IMG_EXTS = [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+def load_rgb_image(path: str | Path) -> Image.Image:
+    with Image.open(path) as image:
+        image.load()
+        return image.convert("RGB")
+
+
+def load_mask_image(path: str | Path) -> Image.Image:
+    with Image.open(path) as image:
+        image.load()
+        return image.copy()
+
+
+def is_valid_sample(img_path: Path, mask_path: Path) -> bool:
+    try:
+        load_rgb_image(img_path)
+        load_mask_image(mask_path)
+        return True
+    except (OSError, ValueError, SyntaxError, RuntimeError, UnidentifiedImageError):
+        return False
 
 
 def load_class_mapping(
@@ -208,8 +231,13 @@ def find_image_path(img_dir: Path, stem: str) -> Optional[Path]:
     return None
 
 
-def build_samples(img_dir: Path, mask_dir: Path) -> List[Sample]:
+def build_samples(
+    img_dir: Path,
+    mask_dir: Path,
+    validate_files: bool = True,
+) -> List[Sample]:
     samples: List[Sample] = []
+    skipped: List[str] = []
     for mask_path in sorted(mask_dir.iterdir()):
         if not mask_path.is_file():
             continue
@@ -220,21 +248,53 @@ def build_samples(img_dir: Path, mask_dir: Path) -> List[Sample]:
         img_path = find_image_path(img_dir, stem)
         if img_path is None:
             continue
+        if validate_files and not is_valid_sample(img_path, mask_path):
+            skipped.append(stem)
+            continue
         samples.append((str(img_path), str(mask_path), stem))
+
+    if skipped:
+        preview = ", ".join(skipped[:5])
+        suffix = "" if len(skipped) <= 5 else ", ..."
+        print(
+            f"[DATASET] skipped {len(skipped)} unreadable/truncated sample(s): "
+            f"{preview}{suffix}"
+        )
     return samples
 
 
 class FoodSegDataset(Dataset):
-    def __init__(self, samples: List[Sample], transform):
+    def __init__(self, samples: List[Sample], transform, max_decode_retries: int = 16):
         self.samples = samples
         self.transform = transform
+        self.max_decode_retries = max(1, min(max_decode_retries, max(1, len(samples))))
+        self._warned_bad_samples: set[str] = set()
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int):
-        img_path, mask_path, stem = self.samples[idx]
-        image = Image.open(img_path).convert("RGB")
-        mask = Image.open(mask_path)
-        image, mask = self.transform(image, mask)
-        return image, mask, stem, img_path, mask_path
+        last_error: Exception | None = None
+
+        for offset in range(self.max_decode_retries):
+            sample_idx = (idx + offset) % len(self.samples)
+            img_path, mask_path, stem = self.samples[sample_idx]
+
+            try:
+                image = load_rgb_image(img_path)
+                mask = load_mask_image(mask_path)
+                image, mask = self.transform(image, mask)
+                return image, mask, stem, img_path, mask_path
+            except (OSError, ValueError, SyntaxError, RuntimeError, UnidentifiedImageError) as exc:
+                last_error = exc
+                sample_key = f"{stem}:{img_path}"
+                if sample_key not in self._warned_bad_samples:
+                    warnings.warn(
+                        f"Skipping unreadable sample '{stem}' at '{img_path}': {exc}",
+                        RuntimeWarning,
+                    )
+                    self._warned_bad_samples.add(sample_key)
+
+        raise RuntimeError(
+            f"Failed to decode a valid sample after {self.max_decode_retries} attempt(s)."
+        ) from last_error
