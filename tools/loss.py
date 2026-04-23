@@ -31,7 +31,7 @@ class CombinedLoss(nn.Module):
         valid_targets = targets.clone()
         valid_targets[valid_targets == self.ignore_index] = 0 # Đổi tạm thành 0 để không bị vỡ one_hot
         
-        targets_1hot = F.one_hot(valid_targets, num_classes=num_classes).permute(0, 3, 1, 2).float()
+        targets_1hot = F.one_hot(valid_targets, num_classes=num_classes).permute(0, 3, 1, 2).to(logits.dtype)
         
         # Áp dụng mask để loại bỏ hoàn toàn ignore_index khỏi quá trình tính Dice
         valid_mask = (targets != self.ignore_index).unsqueeze(1).float()

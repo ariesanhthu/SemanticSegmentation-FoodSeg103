@@ -170,7 +170,7 @@ def build_transforms(cfg: Dict[str, Any]) -> Tuple[Any, EvalTransform]:
     """
     out_size = cfg["train_size"][0] if isinstance(cfg["train_size"], (list, tuple)) else cfg["train_size"]
     
-    train_tf = AlbuCropTransform(
+    train_tf = AlbuTrainTransform(
         size=out_size,
         ignore_index=cfg["ignore_index"],
         background_id=cfg["background_id"]

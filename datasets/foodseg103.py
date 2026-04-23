@@ -19,18 +19,18 @@ import cv2
 # - đường dẫn mask PNG
 # - stem chung của file
 Sample = Tuple[str, str, str]
-
 class AlbuTrainTransform:
-    def __init__(self, size=512, ignore_index=255):
+    # --- Đã thêm background_id vào đây ---
+    def __init__(self, size=512, ignore_index=255, background_id=103):
         self.transform = A.Compose([
             # 1. Resize ảnh to hơn một chút để chừa không gian crop
             A.SmallestMaxSize(max_size=size + 64, interpolation=cv2.INTER_LINEAR),
             
-            # 2. Crop tập trung vào Foreground (Đồ ăn) - Bỏ qua Background (0)
+            # 2. Crop tập trung vào Foreground (Đồ ăn) - Bỏ qua Background (103)
             A.CropNonEmptyMaskIfExists(
                 height=size, 
                 width=size, 
-                ignore_values=[0, ignore_index], # Bỏ qua nền và nhãn rỗng
+                ignore_values=[background_id, ignore_index], # Sử dụng biến background_id thay vì số 0
                 p=1.0
             ),
             
