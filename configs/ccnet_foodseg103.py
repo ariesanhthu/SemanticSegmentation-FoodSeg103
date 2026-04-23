@@ -82,6 +82,8 @@ CFG = {
     "max_iters": 80000,
     "eval_interval": 4000,
     "checkpoint_interval": 4000,
+    "eval_milestones": [50, 100],
+    "checkpoint_milestones": [50, 100],
     "print_freq": 20,
     "grad_clip_norm": None,
 
@@ -93,6 +95,10 @@ CFG = {
     "save_last_name": "last.pth",
     "save_best_name": "best_miou.pth",
     "config_json_name": "config.json",
+    "train_log_name": "train_log.jsonl",
+    "eval_log_name": "eval_log.jsonl",
+    "checkpoint_dirname": "checkpoints",
+    "eval_dirname": "eval_results",
 }
 
 
@@ -106,4 +112,6 @@ def get_paths(cfg: dict) -> dict:
         "test_mask_dir": root / cfg["test_mask_dir"],
         "class_mapping_path": root / cfg["class_mapping_name"],
         "work_dir": Path(cfg["work_dir"]),
+        "checkpoint_dir": Path(cfg["work_dir"]) / cfg["checkpoint_dirname"],
+        "eval_dir": Path(cfg["work_dir"]) / cfg["eval_dirname"],
     }

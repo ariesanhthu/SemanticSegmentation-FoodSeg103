@@ -20,7 +20,7 @@ from datasets.foodseg103_ccnet import (
 )
 from models.ccnet import CCNetSeg
 from utils.metrics import compute_segmentation_scores, fast_hist
-from utils.misc import load_checkpoint, seed_everything
+from utils.misc import ensure_dir, load_checkpoint, save_json, seed_everything
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,6 +122,15 @@ def main() -> None:
     load_checkpoint(ckpt_path, model=model, map_location=cfg["device"])
 
     scores = evaluate(model, loader, cfg, criterion)
+    ensure_dir(paths["eval_dir"])
+    save_json(
+        {
+            "type": "eval_only",
+            "checkpoint": str(ckpt_path),
+            **scores,
+        },
+        paths["eval_dir"] / "eval_only_latest.json",
+    )
     print(json.dumps(format_scores(scores), indent=2))
 
 

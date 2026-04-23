@@ -3,7 +3,7 @@ from contextlib import nullcontext
 import json
 from pathlib import Path
 import sys
-from typing import Dict, Tuple
+from typing import Dict, Iterable, Tuple
 
 import torch
 import torch.nn as nn
@@ -32,6 +32,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=str, default=None, help="Override dataset root.")
     parser.add_argument("--work-dir", type=str, default=None, help="Override work directory.")
     parser.add_argument("--max-iters", type=int, default=None, help="Override max training iterations.")
+    parser.add_argument("--eval-interval", type=int, default=None, help="Override periodic eval interval.")
+    parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=None,
+        help="Override periodic checkpoint interval.",
+    )
     parser.add_argument(
         "--epochs",
         type=int,
@@ -45,6 +52,9 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Use the first N train samples for debugging and evaluate on the same subset.",
     )
+    parser.add_argument("--resume", dest="resume", action="store_true", help="Force resume from last.pth.")
+    parser.add_argument("--no-resume", dest="resume", action="store_false", help="Ignore last.pth.")
+    parser.set_defaults(resume=None)
     parser.add_argument("--eval-only", action="store_true", help="Only run evaluation.")
     return parser.parse_args()
 
@@ -57,10 +67,16 @@ def get_runtime_cfg(args: argparse.Namespace) -> Dict[str, object]:
         cfg["work_dir"] = args.work_dir
     if args.max_iters is not None:
         cfg["max_iters"] = args.max_iters
+    if args.eval_interval is not None:
+        cfg["eval_interval"] = args.eval_interval
+    if args.checkpoint_interval is not None:
+        cfg["checkpoint_interval"] = args.checkpoint_interval
     if args.epochs is not None and args.max_iters is None:
         cfg["epochs"] = args.epochs
     if args.batch_size is not None:
         cfg["batch_size"] = args.batch_size
+    if args.resume is not None:
+        cfg["resume"] = bool(args.resume)
     cfg["overfit_samples"] = max(0, int(args.overfit))
     return resolve_dataset_meta(cfg)
 
@@ -186,6 +202,50 @@ def format_scores(scores: Dict[str, object]) -> Dict[str, object]:
     return {key: to_serializable(value) for key, value in scores.items()}
 
 
+def append_jsonl(path: Path, payload: Dict[str, object]) -> None:
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(format_scores(payload), ensure_ascii=False) + "\n")
+
+
+def should_trigger(
+    cur_iter: int,
+    interval: int,
+    milestones: Iterable[int],
+    max_iter: int,
+) -> bool:
+    if cur_iter >= max_iter:
+        return True
+    if cur_iter in set(int(x) for x in milestones):
+        return True
+    return interval > 0 and cur_iter % interval == 0
+
+
+def resolve_target_max_iters(
+    cfg: Dict[str, object],
+    iters_per_epoch: int,
+    start_iter: int,
+) -> int:
+    if cfg.get("epochs") is not None:
+        additional_iters = max(1, int(cfg["epochs"]) * iters_per_epoch)
+        if start_iter > 0 and bool(cfg["resume"]):
+            target_max_iters = start_iter + additional_iters
+            print(
+                f"Resume=True and checkpoint found. Extending training by "
+                f"epochs={cfg['epochs']} -> +{additional_iters} iter "
+                f"(from iter={start_iter} to target={target_max_iters})."
+            )
+            return target_max_iters
+
+        target_max_iters = additional_iters
+        print(
+            f"Resolved max_iters from epochs: epochs={cfg['epochs']} "
+            f"x iters_per_epoch={iters_per_epoch} -> max_iters={target_max_iters}"
+        )
+        return target_max_iters
+
+    return int(cfg["max_iters"])
+
+
 def poly_lr(base_lr: float, cur_iter: int, max_iter: int, power: float = 0.9) -> float:
     progress = min(float(cur_iter) / float(max_iter), 1.0)
     return base_lr * (1.0 - progress) ** power
@@ -238,6 +298,13 @@ def maybe_resume(
         global_iter = int(checkpoint.get("global_iter", 0))
         best_miou = float(checkpoint.get("best_miou", -1.0))
         print(f"Resumed from {last_path} at iter={global_iter}")
+    elif cfg["resume"]:
+        print(f"resume=True but checkpoint not found at {last_path}. Training from scratch.")
+    else:
+        if last_path.exists():
+            print(f"resume=False. Ignoring existing checkpoint at {last_path}.")
+        else:
+            print("resume=False. Training from scratch.")
 
     return global_iter, best_miou
 
@@ -249,21 +316,17 @@ def run_training(cfg: Dict[str, object]) -> None:
 
     paths = get_paths(cfg)
     ensure_dir(paths["work_dir"])
-    save_json(cfg, paths["work_dir"] / cfg["config_json_name"])
+    ensure_dir(paths["checkpoint_dir"])
+    ensure_dir(paths["eval_dir"])
 
     train_loader, eval_loader = build_loaders(cfg)
     if len(train_loader) == 0:
         raise RuntimeError("Train loader is empty.")
 
-    if cfg.get("epochs") is not None:
-        cfg["max_iters"] = max(1, int(cfg["epochs"]) * len(train_loader))
-        print(
-            f"Resolved max_iters from epochs: epochs={cfg['epochs']} "
-            f"x iters_per_epoch={len(train_loader)} -> max_iters={cfg['max_iters']}"
-        )
-
     last_path = paths["work_dir"] / cfg["save_last_name"]
     best_path = paths["work_dir"] / cfg["save_best_name"]
+    train_log_path = paths["work_dir"] / cfg["train_log_name"]
+    eval_log_path = paths["work_dir"] / cfg["eval_log_name"]
     use_pretrained_backbone = bool(cfg["backbone_pretrained"]) and not (
         cfg["resume"] and last_path.exists()
     )
@@ -280,10 +343,26 @@ def run_training(cfg: Dict[str, object]) -> None:
     scaler = make_grad_scaler(cfg["device"], enabled=amp_enabled)
 
     global_iter, best_miou = maybe_resume(cfg, model, optimizer, scaler, last_path)
+    cfg["max_iters"] = resolve_target_max_iters(cfg, len(train_loader), global_iter)
+    cfg["train_samples"] = len(train_loader.dataset)
+    cfg["eval_samples"] = len(eval_loader.dataset)
+    cfg["start_iter"] = global_iter
+    save_json(cfg, paths["work_dir"] / cfg["config_json_name"])
 
     if global_iter >= cfg["max_iters"]:
         print(f"Checkpoint already reached max_iters={cfg['max_iters']}. Running eval only.")
         scores = evaluate(model, eval_loader, cfg, criterion)
+        scores_payload = {
+            "iter": global_iter,
+            "type": "eval_only",
+            "checkpoint": str(last_path if last_path.exists() else best_path),
+            **scores,
+        }
+        save_json(
+            scores_payload,
+            paths["eval_dir"] / f"iter_{global_iter:06d}_eval_only.json",
+        )
+        append_jsonl(eval_log_path, scores_payload)
         print(json.dumps(format_scores(scores), indent=2))
         return
 
@@ -343,6 +422,17 @@ def run_training(cfg: Dict[str, object]) -> None:
             avg_loss = running_loss / max(1, log_steps)
             running_loss = 0.0
             log_steps = 0
+            train_payload = {
+                "iter": global_iter,
+                "max_iters": cfg["max_iters"],
+                "loss": avg_loss,
+                "main_loss": float(loss_main.item()),
+                "aux_loss": float(loss_aux.item()),
+                "lr": cur_lr,
+                "batch_shape": list(images.shape),
+                "stems": list(stems[:2]),
+            }
+            append_jsonl(train_log_path, train_payload)
             print(
                 f"Iter {global_iter:06d}/{cfg['max_iters']:06d} | "
                 f"loss={avg_loss:.4f} | main={loss_main.item():.4f} | "
@@ -350,13 +440,32 @@ def run_training(cfg: Dict[str, object]) -> None:
                 f"batch={tuple(images.shape)} | stems={list(stems[:2])}"
             )
 
-        should_eval = global_iter % cfg["eval_interval"] == 0 or global_iter == cfg["max_iters"]
-        should_ckpt = (
-            global_iter % cfg["checkpoint_interval"] == 0 or global_iter == cfg["max_iters"]
+        should_eval = should_trigger(
+            cur_iter=global_iter,
+            interval=int(cfg["eval_interval"]),
+            milestones=cfg.get("eval_milestones", []),
+            max_iter=int(cfg["max_iters"]),
+        )
+        should_ckpt = should_trigger(
+            cur_iter=global_iter,
+            interval=int(cfg["checkpoint_interval"]),
+            milestones=cfg.get("checkpoint_milestones", []),
+            max_iter=int(cfg["max_iters"]),
         )
 
         if should_eval:
             scores = evaluate(model, eval_loader, cfg, criterion)
+            eval_payload = {
+                "iter": global_iter,
+                "type": "eval",
+                "loss": scores["loss"],
+                "mIoU": scores["mIoU"],
+                "mAcc": scores["mAcc"],
+                "aAcc": scores["aAcc"],
+                "best_mIoU_before_update": best_miou,
+            }
+            save_json(eval_payload, paths["eval_dir"] / f"iter_{global_iter:06d}.json")
+            append_jsonl(eval_log_path, eval_payload)
             print(
                 f"Eval iter {global_iter:06d} | loss={scores['loss']:.4f} | "
                 f"mIoU={scores['mIoU']:.4f} | mAcc={scores['mAcc']:.4f} | "
@@ -378,6 +487,7 @@ def run_training(cfg: Dict[str, object]) -> None:
                 print(f"Saved best checkpoint to {best_path}")
 
         if should_ckpt:
+            iter_ckpt_path = paths["checkpoint_dir"] / f"iter_{global_iter:06d}.pth"
             save_checkpoint(
                 last_path,
                 epoch=global_iter // len(train_loader),
@@ -388,7 +498,18 @@ def run_training(cfg: Dict[str, object]) -> None:
                 scaler=scaler,
                 cfg=cfg,
             )
+            save_checkpoint(
+                iter_ckpt_path,
+                epoch=global_iter // len(train_loader),
+                global_iter=global_iter,
+                best_miou=best_miou,
+                model=model,
+                optimizer=optimizer,
+                scaler=scaler,
+                cfg=cfg,
+            )
             print(f"Saved last checkpoint to {last_path}")
+            print(f"Saved iter checkpoint to {iter_ckpt_path}")
 
 
 def main() -> None:
