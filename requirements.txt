@@ -6,3 +6,5 @@ pillow
 scikit-learn
 tqdm
 kagglehub
+gradio
+opencv-python
