@@ -26,7 +26,10 @@ CFG = {
     #   - test split : official test
     # This mirrors the FoodSeg103 benchmark repository behavior.
     # ---------------------------------------------------------------------
+    "project_root": os.getenv("PROJECT_ROOT", "."),
     "data_root": os.getenv("DATA_ROOT", "datasets/foodseg103-full"),
+    "manifest": os.getenv("TRAIN_MANIFEST", None),
+    "init_checkpoint": os.getenv("INIT_CHECKPOINT", None),
     "train_img_dir": "train/img",
     "train_mask_dir": "train/mask",
     "test_img_dir": "test/img",
@@ -41,7 +44,7 @@ CFG = {
     # ---------------------------------------------------------------------
     # "work_dir": "/content/drive/MyDrive/[PROJECT][COMPUTER-VISION]/bisenet_foodseg103_benchmark",
     "work_dir": os.getenv("WORK_DIR", "./work_dirs/bisenet_v3"),
-    "resume": True,
+    "resume": os.getenv("RESUME", "false").lower() == "true",
     "save_last_name": "last.pth",
     "save_best_name": "best_miou.pth",
     "print_freq": 20,
@@ -74,8 +77,8 @@ CFG = {
     # ---------------------------------------------------------------------
     # Dataloader
     # ---------------------------------------------------------------------
-    "batch_size": 8,
-    "eval_batch_size": 4,
+    "batch_size": int(os.getenv("BATCH_SIZE", 8)),
+    "eval_batch_size": int(os.getenv("EVAL_BATCH_SIZE", 4)),
     "num_workers": 2,
     "pin_memory": True,
     "drop_last": True,
@@ -86,8 +89,8 @@ CFG = {
     #   SGD, momentum=0.9, weight_decay=1e-4, poly lr, power=0.9
     #   initial lr = 2.5e-2
     # ---------------------------------------------------------------------
-    "epochs": 80,
-    "lr": 1e-3,
+    "epochs": int(os.getenv("EPOCHS", 80)),
+    "lr": float(os.getenv("LR", 1e-3)),
     "momentum": 0.9,
     "weight_decay": 0.0005,
     "poly_power": 0.9,
