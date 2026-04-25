@@ -84,7 +84,7 @@ def parse_args() -> argparse.Namespace:
         dest="num_gpus",
         type=int,
         default=1,
-        help="Number of GPUs to use. Values greater than 1 enable DataParallel.",
+        help="Number of GPUs to use. Defaults to 1.",
     )
     parser.add_argument(
         "--overfit",
@@ -162,21 +162,43 @@ def maybe_wrap_data_parallel(model: nn.Module, cfg: Dict[str, Any]) -> nn.Module
     """
     Wrap model with DataParallel when more than one GPU is requested.
     """
-    num_gpus = int(cfg.get("num_gpus", 1))
+    requested_gpus = int(cfg.get("num_gpus", 1))
 
-    if num_gpus == 1:
+    if requested_gpus == 1:
+        cfg["num_gpus"] = 1
         return model
 
     if not torch.cuda.is_available() or not str(cfg["device"]).startswith("cuda"):
-        raise RuntimeError(f"Requested {num_gpus} GPUs, but CUDA is not available.")
+        print(f"Requested {requested_gpus} GPUs, but CUDA is not available. Using 1 device.")
+        cfg["num_gpus"] = 1
+        return model
 
     available_gpus = torch.cuda.device_count()
-    if num_gpus > available_gpus:
-        raise RuntimeError(
-            f"Requested {num_gpus} GPUs, but only {available_gpus} CUDA device(s) are available."
+    num_gpus = min(requested_gpus, available_gpus)
+
+    if num_gpus < requested_gpus:
+        print(
+            f"Requested {requested_gpus} GPUs, but only {available_gpus} CUDA device(s) "
+            f"are available. Using {num_gpus} GPU(s)."
         )
 
+    if num_gpus <= 1:
+        cfg["num_gpus"] = 1
+        return model
+
+    batch_size = int(cfg.get("batch_size", 1))
+    min_safe_batch_size = num_gpus * 2
+    if batch_size < min_safe_batch_size:
+        print(
+            f"Requested {num_gpus} GPUs with batch_size={batch_size}. "
+            f"DataParallel can create per-GPU batch size < 2 and break BatchNorm. "
+            "Using 1 GPU instead."
+        )
+        cfg["num_gpus"] = 1
+        return model
+
     device_ids = list(range(num_gpus))
+    cfg["num_gpus"] = num_gpus
     print(f"Using DataParallel on GPUs: {device_ids}")
     return nn.DataParallel(model, device_ids=device_ids)
 
