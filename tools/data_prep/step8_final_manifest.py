@@ -44,7 +44,7 @@ def build_train_stage2_manifest():
     final = pd.DataFrame(orig_rows + aug_rows)
     out_path = OUT / "metadata" / "train_stage2_manifest.csv"
     final.to_csv(out_path, index=False)
-    print(f"[Step 8] Saved → {out_path}")
+    print(f"[Step 8] Saved -> {out_path}")
     print(f"  Original: {len(orig_rows)}, Augmented: {len(aug_rows)}, Total: {len(final)}")
     print(f"  Source types: {final['source_type'].value_counts().to_dict()}")
     return final

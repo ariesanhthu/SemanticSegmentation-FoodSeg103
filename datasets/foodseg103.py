@@ -3,13 +3,16 @@ import random
 from typing import List, Optional, Tuple
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 import torch
 from torch.utils.data import Dataset
 from torchvision.transforms import functional as TF
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import cv2
+
 
 # ---------------------------------------------------------------------
 # Type aliases
@@ -359,14 +362,33 @@ class FoodSegDataset(Dataset):
         mask_path : str
             Đường dẫn mask gốc.
         """
-        img_path, mask_path, stem = self.samples[idx]
+        max_retry = 20
+        last_error = None
 
-        # Luôn convert ảnh sang RGB để bảo đảm đúng số kênh.
-        image = Image.open(img_path).convert("RGB")
+        for retry in range(max_retry):
+            real_idx = (idx + retry) % len(self.samples)
+            img_path, mask_path, stem = self.samples[real_idx]
 
-        # Mask giữ nguyên giá trị label, không convert RGB.
-        mask = Image.open(mask_path)
+            try:
+                # Luôn convert ảnh sang RGB để bảo đảm đúng số kênh.
+                with Image.open(img_path) as img:
+                    image = img.convert("RGB")
 
-        image, mask = self.transform(image, mask)
+                # Mask giữ nguyên giá trị label, không convert RGB.
+                with Image.open(mask_path) as m:
+                    mask = m.copy()
 
-        return image, mask, stem, img_path, mask_path
+                image, mask = self.transform(image, mask)
+
+                return image, mask, stem, img_path, mask_path
+
+            except Exception as e:
+                last_error = e
+                print(
+                    f"[WARN] Bad sample skipped: "
+                    f"idx={real_idx}, image={img_path}, mask={mask_path}, error={repr(e)}"
+                )
+
+        raise RuntimeError(
+            f"Too many bad samples near idx={idx}. Last error: {repr(last_error)}"
+        )

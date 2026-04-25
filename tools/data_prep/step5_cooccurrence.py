@@ -51,7 +51,7 @@ def build_cooccurrence_graph():
                 continue
             score = float(cooc_prob[i, j])
             if score <= 0:
-                level = "none"
+                level = "low"
             elif score < 0.05:
                 level = "medium"
             else:
@@ -69,7 +69,7 @@ def build_cooccurrence_graph():
     df = pd.DataFrame(rows)
     out_path = OUT / "graph" / "paste_compatibility.csv"
     df.to_csv(out_path, index=False)
-    print(f"  Saved → {out_path} ({len(df)} pairs)")
+    print(f"  Saved -> {out_path} ({len(df)} pairs)")
     return df
 
 

@@ -139,7 +139,7 @@ def build_sample_training_mapping():
 
     out_path = OUT / "metadata" / "sample_training_mapping.csv"
     df.to_csv(out_path, index=False)
-    print(f"[Step 2] Saved → {out_path}")
+    print(f"[Step 2] Saved -> {out_path}")
     print(f"  Total samples: {len(df)} (train={len(df[df['split']=='train'])}, test={len(df[df['split']=='test'])})")
     print(f"  Difficulty: {df[df['split']=='train']['difficulty_level'].value_counts().to_dict()}")
     print(f"  Aug policy: {df[df['split']=='train']['aug_policy'].value_counts().to_dict()}")

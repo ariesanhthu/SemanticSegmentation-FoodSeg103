@@ -69,7 +69,7 @@ def run_step(step_num: int):
         return
 
     elapsed = time.time() - t0
-    print(f"  ⏱ Step {step_num} done in {elapsed:.1f}s\n")
+    print(f"  Step {step_num} done in {elapsed:.1f}s\n")
 
 
 def main():
