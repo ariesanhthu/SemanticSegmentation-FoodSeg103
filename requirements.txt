@@ -8,3 +8,4 @@ tqdm
 kagglehub
 gradio
 opencv-python
+albumentations

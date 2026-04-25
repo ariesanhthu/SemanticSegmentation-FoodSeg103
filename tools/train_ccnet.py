@@ -1,4 +1,5 @@
 import argparse
+import csv
 from contextlib import nullcontext
 import json
 from pathlib import Path
@@ -24,7 +25,7 @@ from datasets.foodseg103_ccnet import (
 )
 from models.ccnet import CCNetSeg
 from utils.metrics import compute_segmentation_scores, fast_hist
-from utils.misc import ensure_dir, load_checkpoint, save_checkpoint, save_json, seed_everything
+from utils.misc import ensure_dir, load_checkpoint, save_checkpoint, seed_everything
 
 
 def parse_args() -> argparse.Namespace:
@@ -202,9 +203,44 @@ def format_scores(scores: Dict[str, object]) -> Dict[str, object]:
     return {key: to_serializable(value) for key, value in scores.items()}
 
 
-def append_jsonl(path: Path, payload: Dict[str, object]) -> None:
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(format_scores(payload), ensure_ascii=False) + "\n")
+METRIC_FIELDS = [
+    "event",
+    "iter",
+    "max_iters",
+    "epoch",
+    "loss",
+    "main_loss",
+    "aux_loss",
+    "eval_loss",
+    "mIoU",
+    "mAcc",
+    "aAcc",
+    "best_mIoU",
+    "is_best",
+    "lr",
+    "batch_size",
+    "height",
+    "width",
+    "checkpoint",
+]
+
+
+def append_metrics_csv(path: Path, payload: Dict[str, object]) -> None:
+    row = {field: "" for field in METRIC_FIELDS}
+    row.update(
+        {
+            key: value
+            for key, value in format_scores(payload).items()
+            if key in row
+        }
+    )
+    write_header = not path.exists() or path.stat().st_size == 0
+    ensure_dir(path.parent)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=METRIC_FIELDS)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def should_trigger(
@@ -309,6 +345,28 @@ def maybe_resume(
     return global_iter, best_miou
 
 
+def save_resume_checkpoint(
+    path: Path,
+    global_iter: int,
+    best_miou: float,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.cuda.amp.GradScaler,
+    cfg: Dict[str, object],
+    iters_per_epoch: int,
+) -> None:
+    save_checkpoint(
+        path,
+        epoch=global_iter // max(1, iters_per_epoch),
+        global_iter=global_iter,
+        best_miou=best_miou,
+        model=model,
+        optimizer=optimizer,
+        scaler=scaler,
+        cfg=cfg,
+    )
+
+
 def run_training(cfg: Dict[str, object]) -> None:
     seed_everything(cfg["seed"])
     if cfg["cudnn_benchmark"]:
@@ -316,17 +374,13 @@ def run_training(cfg: Dict[str, object]) -> None:
 
     paths = get_paths(cfg)
     ensure_dir(paths["work_dir"])
-    ensure_dir(paths["checkpoint_dir"])
-    ensure_dir(paths["eval_dir"])
 
     train_loader, eval_loader = build_loaders(cfg)
     if len(train_loader) == 0:
         raise RuntimeError("Train loader is empty.")
 
     last_path = paths["work_dir"] / cfg["save_last_name"]
-    best_path = paths["work_dir"] / cfg["save_best_name"]
-    train_log_path = paths["work_dir"] / cfg["train_log_name"]
-    eval_log_path = paths["work_dir"] / cfg["eval_log_name"]
+    metrics_path = paths["work_dir"] / cfg.get("metrics_csv_name", "metrics.csv")
     use_pretrained_backbone = bool(cfg["backbone_pretrained"]) and not (
         cfg["resume"] and last_path.exists()
     )
@@ -347,169 +401,180 @@ def run_training(cfg: Dict[str, object]) -> None:
     cfg["train_samples"] = len(train_loader.dataset)
     cfg["eval_samples"] = len(eval_loader.dataset)
     cfg["start_iter"] = global_iter
-    save_json(cfg, paths["work_dir"] / cfg["config_json_name"])
 
     if global_iter >= cfg["max_iters"]:
         print(f"Checkpoint already reached max_iters={cfg['max_iters']}. Running eval only.")
         scores = evaluate(model, eval_loader, cfg, criterion)
         scores_payload = {
+            "event": "eval_only",
             "iter": global_iter,
-            "type": "eval_only",
-            "checkpoint": str(last_path if last_path.exists() else best_path),
-            **scores,
+            "max_iters": cfg["max_iters"],
+            "epoch": global_iter // len(train_loader),
+            "eval_loss": scores["loss"],
+            "mIoU": scores["mIoU"],
+            "mAcc": scores["mAcc"],
+            "aAcc": scores["aAcc"],
+            "best_mIoU": best_miou,
+            "checkpoint": str(last_path),
         }
-        save_json(
-            scores_payload,
-            paths["eval_dir"] / f"iter_{global_iter:06d}_eval_only.json",
-        )
-        append_jsonl(eval_log_path, scores_payload)
+        append_metrics_csv(metrics_path, scores_payload)
         print(json.dumps(format_scores(scores), indent=2))
         return
 
     data_iter = iter(train_loader)
     running_loss = 0.0
     log_steps = 0
+    last_checkpoint_iter = global_iter if last_path.exists() else -1
 
-    while global_iter < cfg["max_iters"]:
-        try:
-            images, masks, stems, *_ = next(data_iter)
-        except StopIteration:
-            data_iter = iter(train_loader)
-            images, masks, stems, *_ = next(data_iter)
+    try:
+        while global_iter < cfg["max_iters"]:
+            try:
+                images, masks, stems, *_ = next(data_iter)
+            except StopIteration:
+                data_iter = iter(train_loader)
+                images, masks, stems, *_ = next(data_iter)
 
-        images = images.to(cfg["device"], non_blocking=True)
-        masks = masks.to(cfg["device"], non_blocking=True)
+            images = images.to(cfg["device"], non_blocking=True)
+            masks = masks.to(cfg["device"], non_blocking=True)
 
-        cur_lr = poly_lr(
-            base_lr=cfg["lr"],
-            cur_iter=global_iter,
-            max_iter=cfg["max_iters"],
-            power=cfg["poly_power"],
-        )
-        for group in optimizer.param_groups:
-            group["lr"] = cur_lr
+            cur_lr = poly_lr(
+                base_lr=cfg["lr"],
+                cur_iter=global_iter,
+                max_iter=cfg["max_iters"],
+                power=cfg["poly_power"],
+            )
+            for group in optimizer.param_groups:
+                group["lr"] = cur_lr
 
-        model.train()
-        optimizer.zero_grad(set_to_none=True)
+            model.train()
+            optimizer.zero_grad(set_to_none=True)
 
-        with autocast_context(cfg["device"], enabled=amp_enabled):
-            outputs = model(images)
-            if isinstance(outputs, tuple):
-                logits, aux_logits = outputs
-                loss_main = criterion(logits, masks)
-                loss_aux = criterion(aux_logits, masks)
-                loss = loss_main + cfg["aux_weight"] * loss_aux
-            else:
-                logits = outputs
-                loss_main = criterion(logits, masks)
-                loss_aux = torch.zeros((), device=images.device)
-                loss = loss_main
+            with autocast_context(cfg["device"], enabled=amp_enabled):
+                outputs = model(images)
+                if isinstance(outputs, tuple):
+                    logits, aux_logits = outputs
+                    loss_main = criterion(logits, masks)
+                    loss_aux = criterion(aux_logits, masks)
+                    loss = loss_main + cfg["aux_weight"] * loss_aux
+                else:
+                    logits = outputs
+                    loss_main = criterion(logits, masks)
+                    loss_aux = torch.zeros((), device=images.device)
+                    loss = loss_main
 
-        scaler.scale(loss).backward()
+            scaler.scale(loss).backward()
 
-        if cfg["grad_clip_norm"] is not None:
-            scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip_norm"])
+            if cfg["grad_clip_norm"] is not None:
+                scaler.unscale_(optimizer)
+                nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip_norm"])
 
-        scaler.step(optimizer)
-        scaler.update()
+            scaler.step(optimizer)
+            scaler.update()
 
-        global_iter += 1
-        running_loss += float(loss.item())
-        log_steps += 1
+            global_iter += 1
+            running_loss += float(loss.item())
+            log_steps += 1
 
-        if global_iter == 1 or global_iter % cfg["print_freq"] == 0:
-            avg_loss = running_loss / max(1, log_steps)
-            running_loss = 0.0
-            log_steps = 0
-            train_payload = {
-                "iter": global_iter,
-                "max_iters": cfg["max_iters"],
-                "loss": avg_loss,
-                "main_loss": float(loss_main.item()),
-                "aux_loss": float(loss_aux.item()),
-                "lr": cur_lr,
-                "batch_shape": list(images.shape),
-                "stems": list(stems[:2]),
-            }
-            append_jsonl(train_log_path, train_payload)
-            print(
-                f"Iter {global_iter:06d}/{cfg['max_iters']:06d} | "
-                f"loss={avg_loss:.4f} | main={loss_main.item():.4f} | "
-                f"aux={loss_aux.item():.4f} | lr={cur_lr:.6e} | "
-                f"batch={tuple(images.shape)} | stems={list(stems[:2])}"
+            if global_iter == 1 or global_iter % cfg["print_freq"] == 0:
+                avg_loss = running_loss / max(1, log_steps)
+                running_loss = 0.0
+                log_steps = 0
+                train_payload = {
+                    "event": "train",
+                    "iter": global_iter,
+                    "max_iters": cfg["max_iters"],
+                    "epoch": global_iter // len(train_loader),
+                    "loss": avg_loss,
+                    "main_loss": float(loss_main.item()),
+                    "aux_loss": float(loss_aux.item()),
+                    "best_mIoU": best_miou,
+                    "lr": cur_lr,
+                    "batch_size": int(images.shape[0]),
+                    "height": int(images.shape[2]),
+                    "width": int(images.shape[3]),
+                    "checkpoint": str(last_path),
+                }
+                append_metrics_csv(metrics_path, train_payload)
+                print(
+                    f"Iter {global_iter:06d}/{cfg['max_iters']:06d} | "
+                    f"loss={avg_loss:.4f} | main={loss_main.item():.4f} | "
+                    f"aux={loss_aux.item():.4f} | lr={cur_lr:.6e} | "
+                    f"batch={tuple(images.shape)} | stems={list(stems[:2])}"
+                )
+
+            should_eval = should_trigger(
+                cur_iter=global_iter,
+                interval=int(cfg["eval_interval"]),
+                milestones=cfg.get("eval_milestones", []),
+                max_iter=int(cfg["max_iters"]),
+            )
+            should_ckpt = should_trigger(
+                cur_iter=global_iter,
+                interval=int(cfg["checkpoint_interval"]),
+                milestones=cfg.get("checkpoint_milestones", []),
+                max_iter=int(cfg["max_iters"]),
             )
 
-        should_eval = should_trigger(
-            cur_iter=global_iter,
-            interval=int(cfg["eval_interval"]),
-            milestones=cfg.get("eval_milestones", []),
-            max_iter=int(cfg["max_iters"]),
-        )
-        should_ckpt = should_trigger(
-            cur_iter=global_iter,
-            interval=int(cfg["checkpoint_interval"]),
-            milestones=cfg.get("checkpoint_milestones", []),
-            max_iter=int(cfg["max_iters"]),
-        )
+            if should_eval:
+                scores = evaluate(model, eval_loader, cfg, criterion)
+                miou = float(scores["mIoU"])
+                is_best = miou > best_miou
+                if is_best:
+                    best_miou = miou
+                eval_payload = {
+                    "event": "eval",
+                    "iter": global_iter,
+                    "max_iters": cfg["max_iters"],
+                    "epoch": global_iter // len(train_loader),
+                    "eval_loss": scores["loss"],
+                    "mIoU": miou,
+                    "mAcc": scores["mAcc"],
+                    "aAcc": scores["aAcc"],
+                    "best_mIoU": best_miou,
+                    "is_best": int(is_best),
+                    "lr": optimizer.param_groups[0]["lr"],
+                    "checkpoint": str(last_path),
+                }
+                append_metrics_csv(metrics_path, eval_payload)
+                print(
+                    f"Eval iter {global_iter:06d} | loss={scores['loss']:.4f} | "
+                    f"mIoU={miou:.4f} | mAcc={scores['mAcc']:.4f} | "
+                    f"aAcc={scores['aAcc']:.4f} | best={best_miou:.4f}"
+                )
 
-        if should_eval:
-            scores = evaluate(model, eval_loader, cfg, criterion)
-            eval_payload = {
-                "iter": global_iter,
-                "type": "eval",
-                "loss": scores["loss"],
-                "mIoU": scores["mIoU"],
-                "mAcc": scores["mAcc"],
-                "aAcc": scores["aAcc"],
-                "best_mIoU_before_update": best_miou,
-            }
-            save_json(eval_payload, paths["eval_dir"] / f"iter_{global_iter:06d}.json")
-            append_jsonl(eval_log_path, eval_payload)
-            print(
-                f"Eval iter {global_iter:06d} | loss={scores['loss']:.4f} | "
-                f"mIoU={scores['mIoU']:.4f} | mAcc={scores['mAcc']:.4f} | "
-                f"aAcc={scores['aAcc']:.4f}"
-            )
-
-            if scores["mIoU"] > best_miou:
-                best_miou = scores["mIoU"]
-                save_checkpoint(
-                    best_path,
-                    epoch=global_iter // len(train_loader),
+            if should_ckpt:
+                save_resume_checkpoint(
+                    last_path,
                     global_iter=global_iter,
                     best_miou=best_miou,
                     model=model,
                     optimizer=optimizer,
                     scaler=scaler,
                     cfg=cfg,
+                    iters_per_epoch=len(train_loader),
                 )
-                print(f"Saved best checkpoint to {best_path}")
-
-        if should_ckpt:
-            iter_ckpt_path = paths["checkpoint_dir"] / f"iter_{global_iter:06d}.pth"
-            save_checkpoint(
+                last_checkpoint_iter = global_iter
+                print(f"Saved checkpoint to {last_path}")
+    except KeyboardInterrupt:
+        print("\nTraining interrupted. Saving latest checkpoint before exit...")
+        if global_iter > 0 and global_iter != last_checkpoint_iter:
+            save_resume_checkpoint(
                 last_path,
-                epoch=global_iter // len(train_loader),
                 global_iter=global_iter,
                 best_miou=best_miou,
                 model=model,
                 optimizer=optimizer,
                 scaler=scaler,
                 cfg=cfg,
+                iters_per_epoch=len(train_loader),
             )
-            save_checkpoint(
-                iter_ckpt_path,
-                epoch=global_iter // len(train_loader),
-                global_iter=global_iter,
-                best_miou=best_miou,
-                model=model,
-                optimizer=optimizer,
-                scaler=scaler,
-                cfg=cfg,
-            )
-            print(f"Saved last checkpoint to {last_path}")
-            print(f"Saved iter checkpoint to {iter_ckpt_path}")
+            print(f"Saved checkpoint to {last_path}")
+        print(f"Stopped at iter={global_iter}. Re-run with --resume to continue.")
+        return
+
+    print("Training done.")
+    print(f"checkpoint: {last_path}")
+    print(f"metrics: {metrics_path}")
 
 
 def main() -> None:
@@ -524,9 +589,22 @@ def main() -> None:
         _, eval_loader = build_loaders(cfg)
         model = build_model(cfg, backbone_pretrained=False)
         criterion = nn.CrossEntropyLoss(ignore_index=cfg["ignore_index"])
-        ckpt_path = paths["work_dir"] / cfg["save_best_name"]
-        load_checkpoint(ckpt_path, model=model, map_location=cfg["device"])
+        ckpt_path = paths["work_dir"] / cfg["save_last_name"]
+        checkpoint = load_checkpoint(ckpt_path, model=model, map_location=cfg["device"])
         scores = evaluate(model, eval_loader, cfg, criterion)
+        append_metrics_csv(
+            paths["work_dir"] / cfg.get("metrics_csv_name", "metrics.csv"),
+            {
+                "event": "eval_only",
+                "iter": checkpoint.get("global_iter", ""),
+                "eval_loss": scores["loss"],
+                "mIoU": scores["mIoU"],
+                "mAcc": scores["mAcc"],
+                "aAcc": scores["aAcc"],
+                "best_mIoU": checkpoint.get("best_miou", ""),
+                "checkpoint": str(ckpt_path),
+            },
+        )
         print(json.dumps(format_scores(scores), indent=2))
         return
 
