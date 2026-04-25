@@ -1,3 +1,20 @@
+"""Gradio-based demo application for FoodSeg103 semantic segmentation.
+
+This module builds and launches a Gradio Blocks interface that allows users to:
+
+* Select between different segmentation models (BiSeNetV1, CCNet).
+* Upload images or videos for inference.
+* Visualise overlaid segmentation masks, per-class pixel distributions,
+  confidence metrics, and timing breakdowns.
+
+The UI follows a dark-themed, premium design with custom CSS and
+matplotlib charts rendered in matching colours.
+
+Usage::
+
+    python -m app.main [--host HOST] [--port PORT] [--share]
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -10,6 +27,13 @@ if str(ROOT) not in sys.path:
 
 
 def _ensure_numpy_compat() -> None:
+    """Patch missing NumPy aliases for compatibility with older libraries.
+
+    Some downstream packages (e.g. certain Gradio or timm releases)
+    reference deprecated NumPy symbols like ``np.bool8``, ``np.float_``,
+    ``np.complex_``, and ``np.obj2sctype``.  This shim re-adds them so
+    the import chain does not break under NumPy >= 1.24.
+    """
     import numpy as np
 
     if not hasattr(np, "bool8"):
@@ -29,6 +53,12 @@ def _ensure_numpy_compat() -> None:
 
 
 def _ensure_huggingface_hub_compat() -> None:
+    """Patch a missing ``HfFolder`` class in newer ``huggingface_hub`` versions.
+
+    Some model-loading utilities still rely on ``huggingface_hub.HfFolder``
+    which was removed in recent releases.  This shim provides a minimal
+    drop-in replacement backed by the current token API.
+    """
     try:
         import huggingface_hub as hf_hub
     except ImportError:
@@ -382,6 +412,16 @@ label span {
 
 
 def build_demo() -> gr.Blocks:
+    """Construct the Gradio Blocks demo for FoodSeg103.
+
+    Sets up the full UI layout — hero banner, model selector, advanced
+    options, image/video upload tabs, output panels, metrics chart, and
+    timing HTML — and wires the *Run Inference* button to
+    :class:`~app.service.FoodSegDemoService`.
+
+    Returns:
+        gr.Blocks: A ready-to-launch Gradio application instance.
+    """
     service = FoodSegDemoService()
     model_labels = service.get_model_labels()
     default_model = service.get_default_model_label()
@@ -542,6 +582,12 @@ def build_demo() -> gr.Blocks:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for the Gradio demo launcher.
+
+    Returns:
+        argparse.Namespace: Parsed arguments with ``host``, ``port``,
+            and ``share`` fields.
+    """
     parser = argparse.ArgumentParser(description="Launch the FoodSeg103 Gradio demo.")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host for the Gradio server.")
     parser.add_argument("--port", type=int, default=7860, help="Port for the Gradio server.")
@@ -550,6 +596,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Parse arguments, build the Gradio demo, and launch the server."""
     args = parse_args()
     demo = build_demo()
     demo.launch(server_name=args.host, server_port=args.port, share=args.share)

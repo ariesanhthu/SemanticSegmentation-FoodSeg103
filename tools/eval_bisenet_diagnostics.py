@@ -1,3 +1,17 @@
+"""Diagnose BiSeNet prediction collapse on FoodSeg103.
+
+This eval-side debugging tool goes beyond standard benchmarking to detect
+and characterise common failure modes such as prediction collapse into
+sink classes, background over-prediction, and long-tail class neglect.
+
+Outputs include per-image diagnostics (CSV), per-class error analysis,
+sink-class heatmaps, distribution plots, and an annotated text summary.
+
+Usage::
+
+    python tools/eval_bisenet_diagnostics.py [--ckpt PATH] [--split test]
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -33,6 +47,7 @@ from utils.misc import ensure_dir, seed_everything
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the diagnostics report."""
     parser = argparse.ArgumentParser(
         description=(
             "Diagnose BiSeNet prediction collapse on FoodSeg103. "
@@ -68,6 +83,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def parse_size(value: str | None, fallback: tuple[int, int] | None) -> tuple[int, int] | None:
+    """Parse a human-friendly size string (e.g. '512x512') into an ``(H, W)`` tuple."""
     if value is None:
         return fallback
 
@@ -86,16 +102,19 @@ def parse_size(value: str | None, fallback: tuple[int, int] | None) -> tuple[int
 
 
 def safe_div(numerator: float | int, denominator: float | int) -> float:
+    """Return *numerator / denominator*, or ``0.0`` when *denominator* is zero."""
     return float(numerator) / float(denominator) if denominator else 0.0
 
 
 def save_json(obj: Any, path: Path) -> None:
+    """Serialise *obj* to a pretty-printed JSON file at *path*."""
     ensure_dir(path.parent)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(to_jsonable(obj), f, ensure_ascii=False, indent=2)
 
 
 def to_jsonable(value: Any) -> Any:
+    """Recursively convert non-serialisable types (ndarray, Path, etc.) to JSON-safe equivalents."""
     if isinstance(value, dict):
         return {str(key): to_jsonable(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -114,6 +133,7 @@ def to_jsonable(value: Any) -> Any:
 
 
 def save_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
+    """Write a list of dicts as a CSV file with the given column order."""
     ensure_dir(path.parent)
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -122,6 +142,7 @@ def save_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
 
 
 def load_mapping(data_root: Path, cfg: dict) -> dict:
+    """Load ``class_mapping.json`` from *data_root* and reconcile class names/IDs with *cfg*."""
     num_classes = int(cfg["num_classes"])
     background_id = int(cfg["background_id"])
     class_names = [f"class_{idx}" for idx in range(num_classes)]
@@ -161,6 +182,7 @@ def load_mapping(data_root: Path, cfg: dict) -> dict:
 
 
 def resolve_checkpoint_path(cfg: dict, paths: dict, ckpt_arg: str | None) -> Path:
+    """Return the best available checkpoint path, preferring *ckpt_arg* if given."""
     if ckpt_arg:
         return Path(ckpt_arg)
 
@@ -176,6 +198,7 @@ def resolve_checkpoint_path(cfg: dict, paths: dict, ckpt_arg: str | None) -> Pat
 
 
 def peek_checkpoint_cfg(path: Path) -> dict:
+    """Read only the ``cfg`` dict stored inside a checkpoint, without loading the model."""
     if not path.exists():
         return {}
     try:
@@ -190,6 +213,7 @@ def peek_checkpoint_cfg(path: Path) -> dict:
 
 
 def load_checkpoint_flexible(model: torch.nn.Module, ckpt_path: Path, device: str) -> dict:
+    """Load weights from *ckpt_path* into *model*, handling common checkpoint layouts."""
     try:
         checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
     except TypeError:
@@ -227,6 +251,7 @@ def load_checkpoint_flexible(model: torch.nn.Module, ckpt_path: Path, device: st
 
 
 def compute_hist_np(pred: np.ndarray, target: np.ndarray, num_classes: int, ignore_index: int) -> np.ndarray:
+    """Compute a ``(C, C)`` confusion histogram between *pred* and *target* masks."""
     valid = target != ignore_index
     pred_v = pred[valid].astype(np.int64, copy=False)
     target_v = target[valid].astype(np.int64, copy=False)
@@ -236,6 +261,7 @@ def compute_hist_np(pred: np.ndarray, target: np.ndarray, num_classes: int, igno
 
 
 def compute_scores_from_hist(hist: np.ndarray) -> dict:
+    """Derive aAcc, mAcc, mIoU and per-class arrays from a confusion histogram."""
     hist_f = hist.astype(np.float64, copy=False)
     diag = np.diag(hist_f)
     gt_sum = hist_f.sum(axis=1)
@@ -254,6 +280,7 @@ def compute_scores_from_hist(hist: np.ndarray) -> dict:
 
 
 def compute_fg_bg_metrics_from_hist(hist: np.ndarray, background_id: int) -> dict:
+    """Compute binary foreground/background IoU, precision, recall from *hist*."""
     fg_ids = [idx for idx in range(hist.shape[0]) if idx != background_id]
     bg_bg = int(hist[background_id, background_id])
     bg_to_fg = int(hist[background_id, fg_ids].sum())
@@ -279,6 +306,7 @@ def compute_fg_bg_metrics_from_hist(hist: np.ndarray, background_id: int) -> dic
 
 
 def classify_image_failure(row: dict, args: argparse.Namespace, background_id: int) -> str:
+    """Assign one of six failure-group labels to a per-image diagnostics row."""
     if row["gt_fg_pixels"] > 0 and row["pred_fg_ratio"] < 0.02:
         return "background_overprediction"
     if row["dominant_pred_class_id"] != background_id and row["dominant_pred_ratio"] >= args.sink_image_ratio:
@@ -302,6 +330,7 @@ def compute_per_image_row(
     mask_path: str,
     args: argparse.Namespace,
 ) -> dict:
+    """Build a single diagnostics dict for one image, including per-class and binary metrics."""
     num_classes = int(cfg["num_classes"])
     background_id = int(cfg["background_id"])
     ignore_index = int(cfg["ignore_index"])
@@ -377,6 +406,7 @@ def collect_eval_diagnostics(
     cfg: dict,
     args: argparse.Namespace,
 ) -> tuple[np.ndarray, list[dict], np.ndarray, np.ndarray, float]:
+    """Run the model over the full loader, collecting per-image rows and the global confusion matrix."""
     model.eval()
     num_classes = int(cfg["num_classes"])
     ignore_index = int(cfg["ignore_index"])
@@ -439,6 +469,7 @@ def scan_mask_presence(
     max_items: int | None,
     desc: str,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Count per-class image-presence and pixel counts across ground-truth masks."""
     presence = np.zeros(num_classes, dtype=np.int64)
     pixels = np.zeros(num_classes, dtype=np.int64)
     selected = samples if max_items is None else samples[: max(0, int(max_items))]
@@ -463,6 +494,7 @@ def build_class_diagnostics(
     eval_gt_presence: np.ndarray,
     eval_pred_presence: np.ndarray,
 ) -> list[dict]:
+    """Build per-class diagnostic rows with error-type labels, sorted by severity."""
     num_classes = int(cfg["num_classes"])
     background_id = int(cfg["background_id"])
     class_names = cfg["class_names"]
@@ -548,6 +580,7 @@ def build_class_diagnostics(
 
 
 def build_sink_class_analysis(hist: np.ndarray, cfg: dict, top_k: int) -> tuple[list[dict], list[dict]]:
+    """Identify 'sink' classes that absorb many false-positive pixels from other GT classes."""
     background_id = int(cfg["background_id"])
     class_names = cfg["class_names"]
     rows: list[dict] = []
@@ -612,6 +645,7 @@ def build_sink_class_analysis(hist: np.ndarray, cfg: dict, top_k: int) -> tuple[
 
 
 def build_distribution_rows(hist: np.ndarray, cfg: dict, eval_gt_presence: np.ndarray, eval_pred_presence: np.ndarray) -> list[dict]:
+    """Build per-class GT vs predicted pixel distribution rows for CSV/plotting."""
     gt_pixels = hist.sum(axis=1).astype(np.int64)
     pred_pixels = hist.sum(axis=0).astype(np.int64)
     total_gt = int(gt_pixels.sum())
@@ -644,6 +678,7 @@ def build_distribution_rows(hist: np.ndarray, cfg: dict, eval_gt_presence: np.nd
 
 
 def build_collapse_summary(hist: np.ndarray, cfg: dict, distribution_rows: list[dict]) -> dict:
+    """Summarise prediction collapse indicators (coverage, entropy, top-k concentration)."""
     background_id = int(cfg["background_id"])
     gt_pixels = hist.sum(axis=1).astype(np.int64)
     pred_pixels = hist.sum(axis=0).astype(np.int64)
@@ -683,6 +718,7 @@ def build_collapse_summary(hist: np.ndarray, cfg: dict, distribution_rows: list[
 
 
 def summarize_image_groups(per_image_rows: list[dict]) -> list[dict]:
+    """Aggregate per-image metrics by failure group."""
     groups: dict[str, list[dict]] = defaultdict(list)
     for row in per_image_rows:
         groups[row["failure_group"]].append(row)
@@ -704,6 +740,7 @@ def summarize_image_groups(per_image_rows: list[dict]) -> list[dict]:
 
 
 def build_image_threshold_summary(per_image_rows: list[dict]) -> dict:
+    """Count images falling below various metric thresholds."""
     return {
         "num_images": len(per_image_rows),
         "num_images_miou_eq_0": sum(row["miou_present_fg"] == 0 for row in per_image_rows),
@@ -718,6 +755,7 @@ def build_image_threshold_summary(per_image_rows: list[dict]) -> dict:
 
 
 def build_palette(num_classes: int, background_id: int | None = None) -> np.ndarray:
+    """Create a ``tab20``-based colour palette with black for background."""
     cmap = plt.get_cmap("tab20", num_classes)
     palette = (cmap(np.arange(num_classes))[:, :3] * 255).astype(np.uint8)
     if background_id is not None and 0 <= background_id < num_classes:
@@ -726,6 +764,7 @@ def build_palette(num_classes: int, background_id: int | None = None) -> np.ndar
 
 
 def denorm_image(img: torch.Tensor, mean: list[float], std: list[float]) -> np.ndarray:
+    """Reverse ImageNet normalisation on a CHW tensor, returning an HWC float array in [0, 1]."""
     image = img.detach().cpu().permute(1, 2, 0).numpy()
     mean_arr = np.asarray(mean, dtype=np.float32).reshape(1, 1, 3)
     std_arr = np.asarray(std, dtype=np.float32).reshape(1, 1, 3)
@@ -733,6 +772,7 @@ def denorm_image(img: torch.Tensor, mean: list[float], std: list[float]) -> np.n
 
 
 def colorize_mask(mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    """Map an integer label *mask* to a uint8 RGB image using *palette*."""
     output = np.zeros((*mask.shape, 3), dtype=np.uint8)
     valid = (mask >= 0) & (mask < len(palette))
     output[valid] = palette[mask[valid]]
@@ -740,11 +780,13 @@ def colorize_mask(mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
 
 
 def overlay_mask(image: np.ndarray, mask: np.ndarray, palette: np.ndarray, alpha: float = 0.45) -> np.ndarray:
+    """Alpha-blend a colourised *mask* over a float [0,1] *image*."""
     color = colorize_mask(mask, palette).astype(np.float32) / 255.0
     return np.clip((1.0 - alpha) * image + alpha * color, 0.0, 1.0)
 
 
 def make_error_type_map(gt: np.ndarray, pred: np.ndarray, background_id: int, ignore_index: int) -> np.ndarray:
+    """Create a 5-colour error-type RGB map (TN, TP, wrong-class, missed FG, false FG)."""
     valid = gt != ignore_index
     gt_bg = gt == background_id
     pred_bg = pred == background_id
@@ -762,10 +804,12 @@ def make_error_type_map(gt: np.ndarray, pred: np.ndarray, background_id: int, ig
 
 
 def shorten(name: str, max_len: int = 24) -> str:
+    """Truncate *name* to *max_len* characters with a trailing period."""
     return name if len(name) <= max_len else name[: max_len - 1] + "."
 
 
 def plot_gt_pred_distribution(rows: list[dict], output_path: Path, top_k: int) -> None:
+    """Bar chart comparing GT vs predicted pixel counts for the top-k classes."""
     selected = sorted(rows, key=lambda row: row["gt_pixels"] + row["pred_pixels"], reverse=True)[:top_k]
     if not selected:
         return
@@ -791,6 +835,7 @@ def plot_gt_pred_distribution(rows: list[dict], output_path: Path, top_k: int) -
 
 
 def plot_pred_gt_ratio(class_rows: list[dict], output_path: Path, top_k: int) -> None:
+    """Horizontal bar charts of the most over- and under-predicted classes."""
     fg_rows = [row for row in class_rows if row["error_type"] != "background" and row["gt_pixels"] > 0]
     if not fg_rows:
         return
@@ -817,6 +862,7 @@ def plot_pred_gt_ratio(class_rows: list[dict], output_path: Path, top_k: int) ->
 
 
 def plot_sink_classes(rows: list[dict], output_path: Path, top_k: int) -> None:
+    """Bar chart of top sink classes ranked by false-positive pixel count."""
     selected = rows[:top_k]
     if not selected:
         return
@@ -844,6 +890,7 @@ def plot_sink_classes(rows: list[dict], output_path: Path, top_k: int) -> None:
 
 
 def plot_fg_metric_histograms(rows: list[dict], output_path: Path) -> None:
+    """Histograms of per-image foreground IoU, precision, and recall."""
     if not rows:
         return
     ensure_dir(output_path.parent)
@@ -868,6 +915,7 @@ def plot_fg_metric_histograms(rows: list[dict], output_path: Path) -> None:
 
 
 def plot_fg_iou_vs_class_miou(rows: list[dict], output_path: Path) -> None:
+    """Scatter plot of foreground IoU vs class mIoU, coloured by dominant class ratio."""
     if not rows:
         return
     ensure_dir(output_path.parent)
@@ -892,6 +940,7 @@ def plot_fg_iou_vs_class_miou(rows: list[dict], output_path: Path) -> None:
 
 
 def plot_recall_vs_presence(class_rows: list[dict], output_path: Path) -> None:
+    """Scatter of per-class recall vs train presence, annotating the worst classes."""
     fg_rows = [row for row in class_rows if row["error_type"] != "background" and row["gt_pixels"] > 0]
     if not fg_rows:
         return
@@ -919,6 +968,7 @@ def plot_recall_vs_presence(class_rows: list[dict], output_path: Path) -> None:
 
 
 def plot_gt_vs_pred_pixels(class_rows: list[dict], output_path: Path) -> None:
+    """Log-log scatter of GT pixels vs predicted pixels per class."""
     rows = [row for row in class_rows if row["error_type"] != "background"]
     if not rows:
         return
@@ -944,6 +994,7 @@ def plot_gt_vs_pred_pixels(class_rows: list[dict], output_path: Path) -> None:
 
 
 def plot_presence_scatter(class_rows: list[dict], output_path: Path) -> None:
+    """Scatter of GT image-presence vs predicted image-presence per class."""
     rows = [row for row in class_rows if row["error_type"] != "background"]
     if not rows:
         return
@@ -967,6 +1018,7 @@ def plot_presence_scatter(class_rows: list[dict], output_path: Path) -> None:
 
 
 def plot_sink_source_heatmap(source_rows: list[dict], output_path: Path, top_k: int) -> None:
+    """Heatmap showing which GT classes feed false positives into sink predictions."""
     if not source_rows:
         return
     ensure_dir(output_path.parent)
@@ -1013,6 +1065,7 @@ def plot_sink_source_heatmap(source_rows: list[dict], output_path: Path, top_k: 
 
 
 def save_error_legend(output_path: Path) -> None:
+    """Save a small legend image explaining the 5-type error map colours."""
     ensure_dir(output_path.parent)
     labels = [
         ("TN background", [0, 0, 0]),
@@ -1035,6 +1088,7 @@ def save_error_legend(output_path: Path) -> None:
 
 
 def select_group_examples(rows: list[dict], examples_per_group: int) -> dict[str, list[dict]]:
+    """Select representative example images for each failure group."""
     groups: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         groups[row["failure_group"]].append(row)
@@ -1062,6 +1116,7 @@ def save_group_case_grid(
     output_path: Path,
     title: str,
 ) -> None:
+    """Render a 4-column grid (image, GT overlay, prediction, error map) for selected examples."""
     if not rows:
         return
     ensure_dir(output_path.parent)
@@ -1112,6 +1167,7 @@ def write_summary_text(
     class_rows: list[dict],
     sink_rows: list[dict],
 ) -> None:
+    """Write a human-readable plain-text diagnostics report."""
     ensure_dir(output_path.parent)
     never_predicted = [row for row in class_rows if row["error_type"] == "never_predicted"]
     over_predicted = [row for row in class_rows if row["error_type"] == "over_predicted_sink"]
@@ -1182,6 +1238,7 @@ def write_summary_text(
 
 
 def build_loader(cfg: dict, split: str, max_items: int | None) -> tuple[DataLoader, EvalTransform, list[tuple[str, str, str]]]:
+    """Build the evaluation DataLoader for the given *split* ('train', 'val', or 'test')."""
     paths = get_paths(cfg)
     if split == "train":
         img_dir = paths["train_img_dir"]
@@ -1217,6 +1274,7 @@ def build_loader(cfg: dict, split: str, max_items: int | None) -> tuple[DataLoad
 
 
 def main() -> None:
+    """Entry point: parse args, run diagnostics, save all outputs and plots."""
     args = parse_args()
     cfg = CFG.copy()
 
