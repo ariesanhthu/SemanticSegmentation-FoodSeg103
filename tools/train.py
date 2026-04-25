@@ -5,7 +5,7 @@ from typing import Any, Dict, Tuple
 import csv
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from tqdm.auto import tqdm
 # Project imports are added after ROOT is appended to sys.path below.
 
@@ -28,6 +28,7 @@ from datasets.foodseg103 import (
     build_samples,
     set_seed_for_worker,
 )
+from datasets.foodseg_manifest import FoodSegManifestDataset
 from utils.metrics import fast_hist, compute_segmentation_scores
 from utils.misc import seed_everything, ensure_dir, load_checkpoint, save_checkpoint
 
@@ -65,6 +66,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override static checkpoint directory.",
     )
+    parser.add_argument("--manifest", type=str, default=None)
+    parser.add_argument("--project-root", type=str, default=None)
+    parser.add_argument("--init-checkpoint", type=str, default=None)
     parser.add_argument(
         "--batch-size",
         type=int,
@@ -77,6 +81,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Override total training epochs.",
     )
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--gpu",
         "--gpus",
@@ -124,6 +130,22 @@ def get_runtime_cfg(args: argparse.Namespace) -> Dict[str, Any]:
     cfg["num_gpus"] = args.num_gpus
         
     cfg["overfit_samples"] = args.overfit
+
+    if args.project_root is not None:
+        cfg["project_root"] = args.project_root
+
+    if args.manifest is not None:
+        cfg["manifest"] = args.manifest
+
+    if args.init_checkpoint is not None:
+        cfg["init_checkpoint"] = args.init_checkpoint
+
+    if args.lr is not None:
+        cfg["lr"] = args.lr
+
+    # CLI --resume chỉ bật resume khi thật sự truyền
+    if args.resume:
+        cfg["resume"] = True
     
     return cfg
 
@@ -283,21 +305,30 @@ def build_datasets(
     Tuple[Dataset, Dataset]
         (train_dataset, eval_dataset)
     """
-    train_samples = build_samples(paths["train_img_dir"], paths["train_mask_dir"])
-    test_samples = build_samples(paths["test_img_dir"], paths["test_mask_dir"])
-
-    overfit_n = cfg.get("overfit_samples", 0)
-    if overfit_n > 0:
-        print("=" * 80)
-        print(f"OVERFIT MODE ENABLED: Allocating {overfit_n} samples for debugging.")
-        print("=" * 80)
-        train_samples = train_samples[:overfit_n]
-        test_samples = train_samples
-
     train_tf, eval_tf = build_transforms(cfg)
 
-    train_ds = FoodSegDataset(train_samples, train_tf)
+    test_samples = build_samples(paths["test_img_dir"], paths["test_mask_dir"])
     eval_ds = FoodSegDataset(test_samples, eval_tf)
+
+    if cfg.get("manifest"):
+        train_ds = FoodSegManifestDataset(
+            manifest_csv=cfg["manifest"],
+            project_root=cfg.get("project_root", "."),
+            transform=train_tf,
+        )
+    else:
+        train_samples = build_samples(paths["train_img_dir"], paths["train_mask_dir"])
+
+        overfit_n = cfg.get("overfit_samples", 0)
+        if overfit_n > 0:
+            print("=" * 80)
+            print(f"OVERFIT MODE ENABLED: Allocating {overfit_n} samples for debugging.")
+            print("=" * 80)
+            train_samples = train_samples[:overfit_n]
+            eval_ds = FoodSegDataset(train_samples, eval_tf)
+
+        train_ds = FoodSegDataset(train_samples, train_tf)
+
     return train_ds, eval_ds
 
 
@@ -323,15 +354,34 @@ def build_loaders(
     """
     train_ds, eval_ds = build_datasets(cfg, paths)
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg["batch_size"],
-        shuffle=True,
-        num_workers=cfg["num_workers"],
-        pin_memory=cfg["pin_memory"],
-        drop_last=cfg["drop_last"],
-        worker_init_fn=set_seed_for_worker,
-    )
+    if cfg.get("manifest"):
+        weights = train_ds.df["sampling_weight"].astype("float32").values
+        sampler = WeightedRandomSampler(
+            weights=weights,
+            num_samples=len(weights),
+            replacement=True,
+        )
+
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg["batch_size"],
+            sampler=sampler,
+            shuffle=False,
+            num_workers=cfg["num_workers"],
+            pin_memory=cfg["pin_memory"],
+            drop_last=cfg["drop_last"],
+            worker_init_fn=set_seed_for_worker,
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg["batch_size"],
+            shuffle=True,
+            num_workers=cfg["num_workers"],
+            pin_memory=cfg["pin_memory"],
+            drop_last=cfg["drop_last"],
+            worker_init_fn=set_seed_for_worker,
+        )
 
     eval_loader = DataLoader(
         eval_ds,
@@ -475,6 +525,39 @@ def maybe_resume(
         print(f"Resumed from {last_path} at epoch={start_epoch}")
 
     return start_epoch, global_iter, best_miou
+
+
+def load_model_weights_only(model: nn.Module, ckpt_path: str, device: str) -> None:
+    ckpt = torch.load(ckpt_path, map_location=device)
+
+    if "model" in ckpt:
+        state = ckpt["model"]
+    elif "model_state" in ckpt:
+        state = ckpt["model_state"]
+    elif "state_dict" in ckpt:
+        state = ckpt["state_dict"]
+    else:
+        state = ckpt
+
+    model_state = model.state_dict()
+    loaded = {}
+    skipped = []
+
+    for k, v in state.items():
+        kk = k.replace("module.", "")
+        if kk in model_state and model_state[kk].shape == v.shape:
+            loaded[kk] = v
+        else:
+            skipped.append(k)
+
+    model_state.update(loaded)
+    model.load_state_dict(model_state, strict=False)
+
+    print(f"Loaded weights only from: {ckpt_path}")
+    print(f"Loaded keys: {len(loaded)}")
+    print(f"Skipped keys: {len(skipped)}")
+    if skipped:
+        print("Skipped examples:", skipped[:10])
 
 
 # =============================================================================
@@ -837,6 +920,13 @@ def main() -> None:
     # Model / loss / optimizer / scaler
     # -------------------------------------------------------------
     model, criterion, optimizer, scaler = build_model_and_optim(cfg, paths)
+
+    if cfg.get("init_checkpoint"):
+        load_model_weights_only(
+            unwrap_model(model),
+            cfg["init_checkpoint"],
+            cfg["device"],
+        )
 
     # -------------------------------------------------------------
     # Eval-only mode
