@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from PIL import Image
+from PIL import Image, ImageFile
 from tqdm import tqdm
 
 import sys
@@ -16,6 +16,8 @@ from augmentation_ops import light_color_aug, crop_around_bbox, random_foregroun
 BACKGROUND_ID = 103
 BASE = Path(__file__).resolve().parents[2]
 OUT = BASE / "processed"
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 def generate_augmented_images():

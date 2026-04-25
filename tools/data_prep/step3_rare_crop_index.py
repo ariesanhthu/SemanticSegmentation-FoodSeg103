@@ -78,7 +78,7 @@ def build_rare_crop_index():
     df = pd.DataFrame(rows)
     out_path = OUT / "aug_bank" / "rare_crop_index.csv"
     df.to_csv(out_path, index=False)
-    print(f"[Step 3] Saved → {out_path}")
+    print(f"[Step 3] Saved -> {out_path}")
     print(f"  Total rare components: {len(df)}")
     if len(df) > 0:
         print(f"  By group: {df['class_group'].value_counts().to_dict()}")

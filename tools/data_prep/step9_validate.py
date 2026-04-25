@@ -24,7 +24,7 @@ def validate_pipeline():
     if cgm_path.exists():
         cgm = pd.read_csv(cgm_path)
         assert len(cgm) == NUM_CLASSES, f"Expected {NUM_CLASSES} rows, got {len(cgm)}"
-        print(f"✓ class_group_mapping.csv: {len(cgm)} classes")
+        print(f"[OK] class_group_mapping.csv: {len(cgm)} classes")
         print(f"  Groups: {cgm['class_group'].value_counts().to_dict()}")
     else:
         errors.append("class_group_mapping.csv MISSING")
@@ -35,7 +35,7 @@ def validate_pipeline():
         stm = pd.read_csv(stm_path)
         n_train = len(stm[stm["split"] == "train"])
         n_test = len(stm[stm["split"] == "test"])
-        print(f"✓ sample_training_mapping.csv: {len(stm)} total (train={n_train}, test={n_test})")
+        print(f"[OK] sample_training_mapping.csv: {len(stm)} total (train={n_train}, test={n_test})")
         print(f"  Difficulty: {stm[stm['split']=='train']['difficulty_level'].value_counts().to_dict()}")
         print(f"  Aug policy: {stm[stm['split']=='train']['aug_policy'].value_counts().to_dict()}")
     else:
@@ -45,7 +45,7 @@ def validate_pipeline():
     rci_path = OUT / "aug_bank" / "rare_crop_index.csv"
     if rci_path.exists():
         rci = pd.read_csv(rci_path)
-        print(f"✓ rare_crop_index.csv: {len(rci)} components")
+        print(f"[OK] rare_crop_index.csv: {len(rci)} components")
     else:
         errors.append("rare_crop_index.csv MISSING")
 
@@ -53,7 +53,7 @@ def validate_pipeline():
     cpb_path = OUT / "aug_bank" / "copy_paste_bank.csv"
     if cpb_path.exists():
         cpb = pd.read_csv(cpb_path)
-        print(f"✓ copy_paste_bank.csv: {len(cpb)} patches")
+        print(f"[OK] copy_paste_bank.csv: {len(cpb)} patches")
     else:
         errors.append("copy_paste_bank.csv MISSING")
 
@@ -62,12 +62,12 @@ def validate_pipeline():
     compat_path = OUT / "graph" / "paste_compatibility.csv"
     if cooc_path.exists():
         cooc = np.load(cooc_path)
-        print(f"✓ cooccurrence_matrix.npy: shape {cooc.shape}")
+        print(f"[OK] cooccurrence_matrix.npy: shape {cooc.shape}")
     else:
         errors.append("cooccurrence_matrix.npy MISSING")
     if compat_path.exists():
         compat = pd.read_csv(compat_path)
-        print(f"✓ paste_compatibility.csv: {len(compat)} pairs")
+        print(f"[OK] paste_compatibility.csv: {len(compat)} pairs")
     else:
         errors.append("paste_compatibility.csv MISSING")
 
@@ -75,7 +75,7 @@ def validate_pipeline():
     am_path = OUT / "metadata" / "augmentation_manifest.csv"
     if am_path.exists():
         am = pd.read_csv(am_path)
-        print(f"✓ augmentation_manifest.csv: {len(am)} planned augs")
+        print(f"[OK] augmentation_manifest.csv: {len(am)} planned augs")
     else:
         errors.append("augmentation_manifest.csv MISSING")
 
@@ -83,7 +83,7 @@ def validate_pipeline():
     ts2_path = OUT / "metadata" / "train_stage2_manifest.csv"
     if ts2_path.exists():
         ts2 = pd.read_csv(ts2_path)
-        print(f"✓ train_stage2_manifest.csv: {len(ts2)} total samples")
+        print(f"[OK] train_stage2_manifest.csv: {len(ts2)} total samples")
         print(f"  Source types: {ts2['source_type'].value_counts().to_dict()}")
     else:
         errors.append("train_stage2_manifest.csv MISSING")
@@ -104,17 +104,17 @@ def validate_pipeline():
                 if invalid:
                     bad += 1
                     errors.append(f"Invalid class IDs in {aug_masks[i].name}: {invalid}")
-            print(f"✓ Spot-checked {check_n} augmented masks: {bad} invalid")
+            print(f"[OK] Spot-checked {check_n} augmented masks: {bad} invalid")
         else:
             print("  (No augmented masks generated yet)")
 
     print("=" * 60)
     if errors:
-        print(f"✗ {len(errors)} ERRORS:")
+        print(f"[FAIL] {len(errors)} ERRORS:")
         for e in errors:
             print(f"  - {e}")
     else:
-        print("✓ ALL CHECKS PASSED")
+        print("[OK] ALL CHECKS PASSED")
     print("=" * 60)
 
 

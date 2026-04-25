@@ -60,7 +60,7 @@ def build_augmentation_manifest():
     df = pd.DataFrame(manifest)
     out_path = OUT / "metadata" / "augmentation_manifest.csv"
     df.to_csv(out_path, index=False)
-    print(f"[Step 6] Saved → {out_path}")
+    print(f"[Step 6] Saved -> {out_path}")
     print(f"  Total planned augmentations: {len(df)}")
     if len(df) > 0:
         print(f"  By type: {df['aug_type'].value_counts().to_dict()}")

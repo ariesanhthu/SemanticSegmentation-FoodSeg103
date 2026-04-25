@@ -62,7 +62,7 @@ def build_copy_paste_bank():
     df = pd.DataFrame(bank_rows)
     out_path = OUT / "aug_bank" / "copy_paste_bank.csv"
     df.to_csv(out_path, index=False)
-    print(f"[Step 4] Saved → {out_path}")
+    print(f"[Step 4] Saved -> {out_path}")
     print(f"  Total patches: {len(df)}")
     return df
 
