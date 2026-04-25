@@ -1,3 +1,15 @@
+"""Evaluate the CCNet-ResNet50 model on the FoodSeg103 test set.
+
+This script loads a trained CCNet checkpoint, runs inference on the
+FoodSeg103 test split, computes standard segmentation metrics
+(aAcc, mAcc, mIoU) plus the average cross-entropy loss, and saves
+the results as JSON to the evaluation directory.
+
+Usage::
+
+    python tools/eval_ccnet.py [--data-root DIR] [--work-dir DIR] [--checkpoint PATH]
+"""
+
 import argparse
 import json
 from pathlib import Path
@@ -24,6 +36,12 @@ from utils.misc import ensure_dir, load_checkpoint, save_json, seed_everything
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments for CCNet evaluation.
+
+    Returns:
+        argparse.Namespace: Parsed arguments with optional overrides
+            for ``data_root``, ``work_dir``, and ``checkpoint``.
+    """
     parser = argparse.ArgumentParser(description="Evaluate FoodSeg103 CCNet-ResNet50 baseline.")
     parser.add_argument("--data-root", type=str, default=None, help="Override dataset root.")
     parser.add_argument("--work-dir", type=str, default=None, help="Override work directory.")
@@ -37,6 +55,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def get_runtime_cfg(args: argparse.Namespace) -> dict:
+    """Build the runtime configuration dict from defaults and CLI overrides.
+
+    Applies any user-specified ``--data-root`` or ``--work-dir`` overrides
+    on top of the base :data:`CFG`, then resolves dataset metadata
+    (class names, number of classes, etc.) via :func:`resolve_dataset_meta`.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        dict: Fully resolved configuration dictionary.
+    """
     cfg = CFG.copy()
     if args.data_root:
         cfg["data_root"] = args.data_root
@@ -46,17 +76,54 @@ def get_runtime_cfg(args: argparse.Namespace) -> dict:
 
 
 def to_serializable(obj):
+    """Convert a value to a JSON-serializable type.
+
+    If *obj* is a :class:`torch.Tensor`, it is moved to the CPU and
+    converted to a nested Python list.  All other types pass through
+    unchanged.
+
+    Args:
+        obj: Any Python object, potentially a tensor.
+
+    Returns:
+        A JSON-safe representation of *obj*.
+    """
     if torch.is_tensor(obj):
         return obj.detach().cpu().tolist()
     return obj
 
 
 def format_scores(scores: dict) -> dict:
+    """Make every value in *scores* JSON-serializable.
+
+    Args:
+        scores: Mapping of metric names to values (which may include tensors).
+
+    Returns:
+        dict: A new dict with all tensors converted to Python lists.
+    """
     return {key: to_serializable(value) for key, value in scores.items()}
 
 
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, cfg: dict, criterion: nn.Module) -> dict:
+    """Run the model over the full data loader and compute segmentation metrics.
+
+    Accumulates a confusion histogram across all batches, then derives
+    overall segmentation scores (aAcc, mAcc, mIoU) together with the
+    mean batch loss.
+
+    Args:
+        model: The segmentation model (already on the correct device).
+        loader: DataLoader yielding ``(images, masks, ...)`` tuples.
+        cfg: Runtime configuration dict (must include ``num_classes``,
+            ``device``, and ``ignore_index``).
+        criterion: Loss function (e.g. ``CrossEntropyLoss``).
+
+    Returns:
+        dict: Segmentation scores including ``aAcc``, ``mAcc``, ``mIoU``,
+            per-class IoU/Acc arrays, and the average ``loss``.
+    """
     model.eval()
     hist = torch.zeros((cfg["num_classes"], cfg["num_classes"]), device=cfg["device"])
     running_loss = 0.0
@@ -76,6 +143,16 @@ def evaluate(model: nn.Module, loader: DataLoader, cfg: dict, criterion: nn.Modu
 
 
 def main() -> None:
+    """Entry point for CCNet evaluation.
+
+    Orchestrates the full pipeline:
+
+    1. Parse CLI arguments and build runtime config.
+    2. Construct the test dataset and data loader.
+    3. Instantiate :class:`CCNetSeg` and load the checkpoint.
+    4. Call :func:`evaluate` to compute metrics.
+    5. Save results to ``eval_dir / eval_only_latest.json`` and print them.
+    """
     args = parse_args()
     cfg = get_runtime_cfg(args)
     seed_everything(cfg["seed"])

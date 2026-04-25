@@ -1,3 +1,10 @@
+"""Backend service layer for the FoodSeg103 Gradio demo.
+
+Provides :class:`FoodSegDemoService` which manages model presets,
+checkpoint loading/caching, single-image and video inference pipelines,
+and result formatting (overlays, metrics, timing).
+"""
+
 from __future__ import annotations
 
 import colorsys
@@ -30,6 +37,7 @@ from utils.metrics import compute_segmentation_scores, fast_hist
 
 
 def _to_path(value: Any) -> Path | None:
+    """Coerce *value* to a :class:`Path`, or return ``None`` if not possible."""
     if value is None:
         return None
     if isinstance(value, Path):
@@ -46,10 +54,12 @@ def _to_path(value: Any) -> Path | None:
 
 
 def _safe_float(value: float, digits: int = 4) -> float:
+    """Round *value* to *digits* decimal places, ensuring a plain float."""
     return round(float(value), digits)
 
 
 def _build_palette(num_classes: int, background_id: int | None = None) -> np.ndarray:
+    """Generate a deterministic HSV-based colour palette for *num_classes*."""
     palette = np.zeros((num_classes, 3), dtype=np.uint8)
     for idx in range(num_classes):
         hue = ((idx * 37) % 360) / 360.0
@@ -63,12 +73,14 @@ def _build_palette(num_classes: int, background_id: int | None = None) -> np.nda
 
 
 def _resize_mask(mask: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """Resize a label mask to *(W, H)* using nearest-neighbour interpolation."""
     pil_mask = Image.fromarray(mask.astype(np.uint8), mode="L")
     resized = pil_mask.resize(size, Image.NEAREST)
     return np.asarray(resized, dtype=np.uint8)
 
 
 def _colorize_mask(mask: np.ndarray, palette: np.ndarray) -> np.ndarray:
+    """Map integer label *mask* to an RGB image using *palette*."""
     colored = np.zeros((*mask.shape, 3), dtype=np.uint8)
     valid = (mask >= 0) & (mask < len(palette))
     colored[valid] = palette[mask[valid]]
@@ -82,6 +94,7 @@ def _overlay_mask(
     alpha: float,
     ignore_index: int | None = None,
 ) -> np.ndarray:
+    """Alpha-blend a colourised *mask* onto *image_rgb*."""
     color = _colorize_mask(mask, palette).astype(np.float32)
     image = image_rgb.astype(np.float32)
     overlay = ((1.0 - alpha) * image) + (alpha * color)
@@ -94,6 +107,7 @@ def _overlay_mask(
 
 
 def _load_rgb_image(path: Path) -> Image.Image:
+    """Open an image file and return it as an RGB :class:`PIL.Image.Image`."""
     with Image.open(path) as image:
         image.load()
         return image.convert("RGB")
@@ -105,6 +119,7 @@ def _load_label_mask(
     num_classes: int,
     ignore_index: int,
 ) -> torch.Tensor:
+    """Load a ground-truth mask as an ``int64`` tensor, clamping invalid labels."""
     with Image.open(path) as image:
         image.load()
         if target_size is not None:
@@ -122,6 +137,7 @@ def _load_display_mask(
     target_size: tuple[int, int] | None,
     ignore_index: int,
 ) -> np.ndarray:
+    """Load a mask for display purposes (uint8 NumPy array)."""
     with Image.open(path) as image:
         image.load()
         if target_size is not None:
@@ -133,6 +149,7 @@ def _load_display_mask(
 
 
 def _extract_state_dict(checkpoint: Any) -> dict[str, torch.Tensor]:
+    """Extract a raw state-dict from a checkpoint object."""
     if isinstance(checkpoint, dict):
         for key in ("model", "state_dict", "model_state_dict"):
             state_dict = checkpoint.get(key)
@@ -148,6 +165,7 @@ def _load_checkpoint_flexible(
     checkpoint_path: Path,
     device: str,
 ) -> dict[str, Any]:
+    """Load weights into *model*, tolerating common checkpoint variations."""
     try:
         checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     except TypeError:
@@ -176,6 +194,7 @@ def _load_checkpoint_flexible(
 
 
 def _autocast_context(device: str, amp_enabled: bool):
+    """Return a mixed-precision autocast context if applicable, else a no-op."""
     if device.startswith("cuda") and amp_enabled and torch.cuda.is_available():
         return torch.autocast(device_type="cuda", dtype=torch.float16)
     return nullcontext()
@@ -186,6 +205,7 @@ def _summarize_classes(
     class_names: list[str],
     top_k: int = 8,
 ) -> list[dict[str, Any]]:
+    """Return the *top_k* most frequent classes in *mask* with pixel counts."""
     class_ids, counts = np.unique(mask, return_counts=True)
     order = np.argsort(counts)[::-1]
     total = max(1, int(mask.size))
@@ -209,6 +229,7 @@ def _summarize_quality_scores(
     class_names: list[str],
     top_k: int = 8,
 ) -> list[dict[str, Any]]:
+    """Rank valid classes by IoU and return the *top_k* best performers."""
     iou = np.asarray(scores["IoU_per_class"])
     acc = np.asarray(scores["Acc_per_class"])
     valid = np.asarray(scores["valid_class_mask"]).astype(bool)
@@ -229,6 +250,8 @@ def _summarize_quality_scores(
 
 @dataclass(frozen=True)
 class ModelPreset:
+    """Immutable descriptor for a registered segmentation model variant."""
+
     key: str
     label: str
     cfg: dict[str, Any]
@@ -242,6 +265,8 @@ class ModelPreset:
 
 @dataclass
 class LoadedModel:
+    """A model that has been instantiated, loaded from a checkpoint, and is ready for inference."""
+
     preset: ModelPreset
     checkpoint_path: Path
     model: torch.nn.Module
@@ -250,7 +275,10 @@ class LoadedModel:
 
 
 class FoodSegDemoService:
+    """Stateful service that owns model presets, caches loaded models, and runs inference."""
+
     def __init__(self) -> None:
+        """Initialise presets, label mappings, and test-sample index."""
         self.root = ROOT
         self.presets = self._build_presets()
         self.label_to_key = {preset.label: key for key, preset in self.presets.items()}
@@ -258,6 +286,7 @@ class FoodSegDemoService:
         self._loaded_models: dict[tuple[str, str], LoadedModel] = {}
 
     def _build_presets(self) -> dict[str, ModelPreset]:
+        """Create :class:`ModelPreset` entries for BiSeNet and CCNet."""
         bisenet_cfg = BISENET_CFG.copy()
         bisenet_paths = get_bisenet_paths(bisenet_cfg)
         mapping = load_class_mapping(
@@ -320,6 +349,7 @@ class FoodSegDemoService:
         return presets
 
     def _index_test_samples(self) -> dict[str, dict[str, Path]]:
+        """Scan the test-set directories and build an image-name → path mapping."""
         samples: dict[str, dict[str, Path]] = {}
         reference_preset = self.presets["ccnet"] if "ccnet" in self.presets else next(iter(self.presets.values()))
         if not reference_preset.test_img_dir.exists() or not reference_preset.test_mask_dir.exists():
@@ -343,19 +373,24 @@ class FoodSegDemoService:
         return samples
 
     def get_model_labels(self) -> list[str]:
+        """Return human-readable labels for all registered models."""
         return [preset.label for preset in self.presets.values()]
 
     def get_default_model_label(self) -> str:
+        """Return the label of the first registered model (the default)."""
         return next(iter(self.presets.values())).label
 
     def get_test_image_choices(self, limit: int = 24) -> list[str]:
+        """Return up to *limit* test-image filenames for the dropdown."""
         return list(self._test_samples.keys())[:limit]
 
     def get_default_test_image(self) -> str | None:
+        """Return the first test image name, or ``None`` if none exist."""
         choices = self.get_test_image_choices(limit=1)
         return choices[0] if choices else None
 
     def describe_model(self, model_label: str) -> str:
+        """Return a Markdown snippet describing the selected model's config."""
         preset = self._get_preset(model_label)
         checkpoint = preset.checkpoint_path
         checkpoint_text = str(checkpoint) if checkpoint is not None else "Default checkpoint not found"
@@ -373,12 +408,14 @@ class FoodSegDemoService:
         )
 
     def _get_preset(self, model_label: str) -> ModelPreset:
+        """Look up a :class:`ModelPreset` by its human-readable label."""
         key = self.label_to_key.get(model_label)
         if key is None:
             raise ValueError(f"Unknown model label: {model_label}")
         return self.presets[key]
 
     def _resolve_checkpoint(self, preset: ModelPreset, checkpoint_override: str | None) -> Path:
+        """Determine the checkpoint path, preferring *checkpoint_override* if given."""
         override_path = _to_path(checkpoint_override)
         checkpoint = override_path if override_path is not None else preset.checkpoint_path
         if checkpoint is None:
@@ -396,6 +433,7 @@ class FoodSegDemoService:
         model_label: str,
         checkpoint_override: str | None = None,
     ) -> LoadedModel:
+        """Return a cached :class:`LoadedModel`, building and loading it on first access."""
         preset = self._get_preset(model_label)
         checkpoint = self._resolve_checkpoint(preset, checkpoint_override)
         cache_key = (preset.key, str(checkpoint))
@@ -421,6 +459,7 @@ class FoodSegDemoService:
         image: Image.Image,
         preset: ModelPreset,
     ) -> tuple[torch.Tensor, tuple[int, int], tuple[int, int]]:
+        """Resize, normalise, and batch-wrap an image for model input."""
         original_w, original_h = image.size
         resized = image
         if preset.input_size is not None:
@@ -441,6 +480,7 @@ class FoodSegDemoService:
         loaded: LoadedModel,
         alpha: float,
     ) -> dict[str, Any]:
+        """Run inference on a single image and return all outputs with timing."""
         overall_start = perf_counter()
         load_start = perf_counter()
         image = _load_rgb_image(image_path)
@@ -498,6 +538,7 @@ class FoodSegDemoService:
         selected_test_image: str | None,
         ground_truth_mask_path: Any,
     ) -> tuple[Path, Path | None, str]:
+        """Resolve the image source from upload or test-set selection."""
         uploaded_image = _to_path(image_path)
         uploaded_mask = _to_path(ground_truth_mask_path)
         if uploaded_image is not None:
@@ -520,6 +561,7 @@ class FoodSegDemoService:
         checkpoint_override: str | None,
         alpha: float,
     ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray, dict[str, Any], dict[str, Any]]:
+        """Run single-image inference and return input, GT overlay, prediction overlay, metrics, and timing."""
         loaded = self._get_loaded_model(model_label, checkpoint_override)
         image_path, gt_path, source_type = self._resolve_image_source(
             image_path=uploaded_image_path,
@@ -616,6 +658,7 @@ class FoodSegDemoService:
         checkpoint_override: str | None,
         alpha: float,
     ) -> tuple[str, dict[str, Any], dict[str, Any]]:
+        """Run frame-by-frame inference on a video and return the overlay video path, metrics, and timing."""
         video_path = _to_path(uploaded_video_path)
         if video_path is None:
             raise ValueError("Upload a video to continue.")

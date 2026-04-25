@@ -78,6 +78,15 @@ def parse_args() -> argparse.Namespace:
         help="Override total training epochs.",
     )
     parser.add_argument(
+        "--gpu",
+        "--gpus",
+        "--num-gpus",
+        dest="num_gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs to use. Values greater than 1 enable DataParallel.",
+    )
+    parser.add_argument(
         "--overfit",
         type=int,
         default=0,
@@ -110,6 +119,9 @@ def get_runtime_cfg(args: argparse.Namespace) -> Dict[str, Any]:
         cfg["batch_size"] = args.batch_size
     if args.epochs is not None:
         cfg["epochs"] = args.epochs
+    if args.num_gpus < 1:
+        raise ValueError("--gpu/--gpus/--num-gpus must be greater than or equal to 1.")
+    cfg["num_gpus"] = args.num_gpus
         
     cfg["overfit_samples"] = args.overfit
     
@@ -137,6 +149,36 @@ def get_runtime_paths(cfg: Dict[str, Any]) -> Dict[str, Path]:
         - ...
     """
     return get_paths(cfg)
+
+
+def unwrap_model(model: nn.Module) -> nn.Module:
+    """
+    Return the underlying model when using wrappers such as DataParallel.
+    """
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
+def maybe_wrap_data_parallel(model: nn.Module, cfg: Dict[str, Any]) -> nn.Module:
+    """
+    Wrap model with DataParallel when more than one GPU is requested.
+    """
+    num_gpus = int(cfg.get("num_gpus", 1))
+
+    if num_gpus == 1:
+        return model
+
+    if not torch.cuda.is_available() or not str(cfg["device"]).startswith("cuda"):
+        raise RuntimeError(f"Requested {num_gpus} GPUs, but CUDA is not available.")
+
+    available_gpus = torch.cuda.device_count()
+    if num_gpus > available_gpus:
+        raise RuntimeError(
+            f"Requested {num_gpus} GPUs, but only {available_gpus} CUDA device(s) are available."
+        )
+
+    device_ids = list(range(num_gpus))
+    print(f"Using DataParallel on GPUs: {device_ids}")
+    return nn.DataParallel(model, device_ids=device_ids)
 
 
 # =============================================================================
@@ -303,6 +345,7 @@ def build_model_and_optim(
         model, criterion, optimizer, scaler
     """
     model = build_model(cfg, paths).to(cfg["device"])
+    model = maybe_wrap_data_parallel(model, cfg)
 
     # criterion = nn.CrossEntropyLoss(ignore_index=cfg["ignore_index"])
     criterion = CombinedLoss(
@@ -399,7 +442,7 @@ def maybe_resume(
     if cfg["resume"] and last_path.exists():
         ckpt = load_checkpoint(
             last_path,
-            model,
+            unwrap_model(model),
             optimizer,
             scaler,
             map_location=cfg["device"],
@@ -702,7 +745,7 @@ def run_training(
                     epoch,
                     global_iter,
                     best_miou,
-                    model,
+                    unwrap_model(model),
                     optimizer,
                     scaler,
                     cfg,
@@ -720,7 +763,7 @@ def run_training(
             epoch,
             global_iter,
             best_miou,
-            model,
+            unwrap_model(model),
             optimizer,
             scaler,
             cfg,

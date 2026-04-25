@@ -1,3 +1,15 @@
+"""Evaluate the BiSeNetV1 model on the FoodSeg103 test set.
+
+This script loads a trained BiSeNetV1 checkpoint, runs inference on the
+FoodSeg103 test split, and computes standard segmentation metrics
+(aAcc, mAcc, mIoU) plus the average cross-entropy loss.
+Results are printed to stdout.
+
+Usage::
+
+    python tools/eval.py
+"""
+
 from pathlib import Path
 import sys
 
@@ -15,7 +27,22 @@ from utils.metrics import fast_hist, compute_segmentation_scores
 from utils.misc import load_checkpoint
 
 
-def main():
+def main() -> None:
+    """Run the full evaluation pipeline.
+
+    Steps:
+        1. Load configuration and dataset paths from
+           :mod:`configs.bisenet_foodseg103`.
+        2. Build the test :class:`~torch.utils.data.DataLoader` with
+           :class:`EvalTransform` (no augmentation).
+        3. Instantiate :class:`BiSeNetV1` and restore weights from the
+           best checkpoint.
+        4. Iterate over the test set in evaluation mode, accumulate the
+           confusion histogram via :func:`fast_hist`, and compute the
+           cross-entropy loss.
+        5. Derive segmentation scores with
+           :func:`compute_segmentation_scores` and print them.
+    """
     cfg = CFG.copy()
     paths = get_paths(cfg)
 
