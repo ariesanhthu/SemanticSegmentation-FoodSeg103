@@ -352,12 +352,8 @@ def build_datasets(
     if cfg.get("manifest"):
         train_ds = FoodSegManifestDataset(
             manifest_csv=cfg["manifest"],
-<<<<<<< HEAD
             data_root=cfg["data_root"],
             train_stage=cfg.get("train_stage", "easy"),
-=======
-            project_root=cfg.get("project_root", "."),
->>>>>>> 4b2263ec99bfd68c12e9df2ee5b7100f626d0ed2
             transform=train_tf,
         )
     else:
