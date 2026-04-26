@@ -3,7 +3,7 @@ main.pdf
 datasets/foodseg103-full
 work_dirs
 *.png
-
+*.rar
 # --- Model weights & training artifacts ---
 models/pretrain
 *.pt

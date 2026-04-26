@@ -2,7 +2,7 @@
 
 This module builds and launches a Gradio Blocks interface that allows users to:
 
-* Select between different segmentation models (BiSeNetV1, CCNet).
+* Select between different segmentation models (BiSeNetV1, BiSeNetV1 v4, CCNet).
 * Upload images or videos for inference.
 * Visualise overlaid segmentation masks, per-class pixel distributions,
   confidence metrics, and timing breakdowns.
@@ -94,8 +94,50 @@ def _ensure_huggingface_hub_compat() -> None:
     hf_hub.HfFolder = HfFolder
 
 
+def _ensure_gradio_schema_compat() -> None:
+    """Patch Gradio client schema parser for boolean JSON-schema branches.
+
+    Args:
+        None.
+    Returns:
+        None.
+    Raises:
+        None.
+    """
+    try:
+        from gradio_client import utils as gr_client_utils
+    except ImportError:
+        return
+
+    target_name = "_json_schema_to_python_type"
+    original = getattr(gr_client_utils, target_name, None)
+    if original is None:
+        return
+
+    if getattr(original, "__foodseg_bool_schema_patch__", False):
+        return
+
+    def _patched_json_schema_to_python_type(schema, defs=None):
+        # Gradio <-> pydantic schema mismatch: schema can be plain bool.
+        if isinstance(schema, bool):
+            return "Any" if schema else "None"
+
+        if isinstance(schema, dict):
+            additional = schema.get("additionalProperties")
+            if isinstance(additional, bool):
+                # Normalize to a dict-like branch expected by older parser code.
+                schema = dict(schema)
+                schema["additionalProperties"] = {} if additional else {"type": "null"}
+
+        return original(schema, defs)
+
+    _patched_json_schema_to_python_type.__foodseg_bool_schema_patch__ = True
+    setattr(gr_client_utils, target_name, _patched_json_schema_to_python_type)
+
+
 _ensure_numpy_compat()
 _ensure_huggingface_hub_compat()
+_ensure_gradio_schema_compat()
 
 import gradio as gr
 import matplotlib

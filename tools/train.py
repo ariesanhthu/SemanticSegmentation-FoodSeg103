@@ -32,6 +32,45 @@ from datasets.foodseg_manifest import FoodSegManifestDataset
 from utils.metrics import fast_hist, compute_segmentation_scores
 from utils.misc import seed_everything, ensure_dir, load_checkpoint, save_checkpoint
 
+
+def _build_grad_scaler(amp_enabled: bool, device: str):
+    """Create GradScaler using new AMP API with backward compatibility.
+
+    Args:
+        amp_enabled: Whether AMP is enabled in runtime config.
+        device: Runtime device string, e.g. ``"cuda"`` or ``"cpu"``.
+    Returns:
+        A GradScaler instance compatible with the current PyTorch version.
+    Raises:
+        None.
+    """
+    use_cuda = str(device).startswith("cuda")
+    enabled = bool(amp_enabled) and use_cuda
+    try:
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    except (AttributeError, TypeError):
+        return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def _autocast(device: str, amp_enabled: bool):
+    """Return autocast context manager using modern AMP API when available.
+
+    Args:
+        device: Runtime device string.
+        amp_enabled: Whether AMP should be enabled.
+    Returns:
+        Autocast context manager object.
+    Raises:
+        None.
+    """
+    use_cuda = str(device).startswith("cuda")
+    enabled = bool(amp_enabled) and use_cuda
+    try:
+        return torch.amp.autocast(device_type="cuda", enabled=enabled)
+    except (AttributeError, TypeError):
+        return torch.cuda.amp.autocast(enabled=enabled)
+
+
 # =============================================================================
 # Argument parsing
 # =============================================================================
@@ -313,7 +352,8 @@ def build_datasets(
     if cfg.get("manifest"):
         train_ds = FoodSegManifestDataset(
             manifest_csv=cfg["manifest"],
-            project_root=cfg.get("project_root", "."),
+            data_root=cfg["data_root"],
+            train_stage=cfg.get("train_stage", "easy"),
             transform=train_tf,
         )
     else:
@@ -399,7 +439,7 @@ def build_loaders(
 def build_model_and_optim(
     cfg: Dict[str, Any],
     paths: Dict[str, Path],
-) -> Tuple[nn.Module, nn.Module, torch.optim.Optimizer, torch.cuda.amp.GradScaler]:
+) -> Tuple[nn.Module, nn.Module, torch.optim.Optimizer, Any]:
     """
     Build model, criterion, optimizer, and AMP scaler.
 
@@ -435,7 +475,7 @@ def build_model_and_optim(
         weight_decay=cfg["weight_decay"],
     )
 
-    scaler = torch.cuda.amp.GradScaler(enabled=cfg["amp"])
+    scaler = _build_grad_scaler(amp_enabled=bool(cfg["amp"]), device=str(cfg["device"]))
     return model, criterion, optimizer, scaler
 
 
@@ -480,7 +520,7 @@ def maybe_resume(
     last_path: Path,
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
-    scaler: torch.cuda.amp.GradScaler,
+    scaler: Any,
 ) -> Tuple[int, int, float]:
     """
     Resume training state from last checkpoint if enabled and available.
@@ -633,7 +673,7 @@ def train_one_epoch(
     cfg: Dict[str, Any],
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
-    scaler: torch.cuda.amp.GradScaler,
+    scaler: Any,
     epoch: int,
     global_iter: int,
     max_iter: int,
@@ -700,7 +740,7 @@ def train_one_epoch(
         # - aux16 logits
         # - aux32 logits
         # -------------------------------------------------------------
-        with torch.cuda.amp.autocast(enabled=cfg["amp"]):
+        with _autocast(device=str(cfg["device"]), amp_enabled=bool(cfg["amp"])):
             logits, aux16, aux32 = model(images)
 
             loss_main = criterion(logits, masks)
@@ -743,7 +783,7 @@ def run_training(
     model: nn.Module,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
-    scaler: torch.cuda.amp.GradScaler,
+    scaler: Any,
     train_loader: DataLoader,
     eval_loader: DataLoader,
     cfg: Dict[str, Any],

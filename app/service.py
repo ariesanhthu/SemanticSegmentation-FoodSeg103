@@ -286,17 +286,24 @@ class FoodSegDemoService:
         self._loaded_models: dict[tuple[str, str], LoadedModel] = {}
 
     def _build_presets(self) -> dict[str, ModelPreset]:
-        """Create :class:`ModelPreset` entries for BiSeNet and CCNet."""
-        bisenet_cfg = BISENET_CFG.copy()
-        bisenet_paths = get_bisenet_paths(bisenet_cfg)
-        mapping = load_class_mapping(
-            data_root=Path(bisenet_cfg["data_root"]),
-            mapping_name="class_mapping.json",
-            fallback_num_classes=bisenet_cfg["num_classes"],
-            fallback_background_id=bisenet_cfg["background_id"],
-            fallback_num_ingredient_classes=bisenet_cfg["num_classes"] - 1,
-        )
-        bisenet_cfg.update(mapping)
+        """Create :class:`ModelPreset` entries for BiSeNet variants and CCNet."""
+        def prepare_bisenet_cfg(work_dir: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+            cfg = BISENET_CFG.copy()
+            if work_dir is not None:
+                cfg["work_dir"] = work_dir
+            paths = get_bisenet_paths(cfg)
+            mapping = load_class_mapping(
+                data_root=Path(cfg["data_root"]),
+                mapping_name="class_mapping.json",
+                fallback_num_classes=cfg["num_classes"],
+                fallback_background_id=cfg["background_id"],
+                fallback_num_ingredient_classes=cfg["num_classes"] - 1,
+            )
+            cfg.update(mapping)
+            return cfg, paths
+
+        bisenet_cfg, bisenet_paths = prepare_bisenet_cfg()
+        bisenet_v4_cfg, bisenet_v4_paths = prepare_bisenet_cfg("work_dirs/bisenet_v4")
 
         ccnet_cfg = resolve_dataset_meta(CCNET_CFG.copy())
         ccnet_paths = get_ccnet_paths(ccnet_cfg)
@@ -332,6 +339,17 @@ class FoodSegDemoService:
                 test_mask_dir=bisenet_paths["test_mask_dir"],
                 class_names=bisenet_cfg["class_names"],
                 input_size=bisenet_cfg.get("test_size"),
+                build_model=make_bisenet,
+            ),
+            "bisenet_v4": ModelPreset(
+                key="bisenet_v4",
+                label="BiSeNetV1 v4 (FoodSeg103)",
+                cfg=bisenet_v4_cfg,
+                checkpoint_path=(bisenet_v4_paths["work_dir"] / "bisenet_v4.pth"),
+                test_img_dir=bisenet_v4_paths["test_img_dir"],
+                test_mask_dir=bisenet_v4_paths["test_mask_dir"],
+                class_names=bisenet_v4_cfg["class_names"],
+                input_size=bisenet_v4_cfg.get("test_size"),
                 build_model=make_bisenet,
             ),
             "ccnet": ModelPreset(
