@@ -356,6 +356,14 @@ def build_datasets(
             train_stage=cfg.get("train_stage", "easy"),
             transform=train_tf,
         )
+
+        overfit_n = cfg.get("overfit_samples", 0)
+        if overfit_n > 0:
+            print("=" * 80)
+            print(f"OVERFIT MODE ENABLED on manifest: {overfit_n} samples")
+            print("=" * 80)
+            train_ds.df = train_ds.df.head(overfit_n).copy()
+            eval_ds = train_ds
     else:
         train_samples = build_samples(paths["train_img_dir"], paths["train_mask_dir"])
 
