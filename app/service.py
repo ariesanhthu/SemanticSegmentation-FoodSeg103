@@ -302,8 +302,10 @@ class FoodSegDemoService:
             cfg.update(mapping)
             return cfg, paths
 
-        bisenet_cfg, bisenet_paths = prepare_bisenet_cfg()
+        bisenet_cfg, bisenet_paths = prepare_bisenet_cfg("work_dirs/bisenet_rtb")
         bisenet_v4_cfg, bisenet_v4_paths = prepare_bisenet_cfg("work_dirs/bisenet_v4")
+        app_test_img_dir = self.root / "app" / "test" / "img"
+        app_test_mask_dir = self.root / "app" / "test" / "mask"
 
         ccnet_cfg = resolve_dataset_meta(CCNET_CFG.copy())
         ccnet_paths = get_ccnet_paths(ccnet_cfg)
@@ -332,11 +334,11 @@ class FoodSegDemoService:
         presets = {
             "bisenet": ModelPreset(
                 key="bisenet",
-                label="BiSeNetV1 (FoodSeg103)",
+                label="BiSeNetV1 RTB (FoodSeg103)",
                 cfg=bisenet_cfg,
                 checkpoint_path=(bisenet_paths["work_dir"] / bisenet_cfg["save_best_name"]),
-                test_img_dir=bisenet_paths["test_img_dir"],
-                test_mask_dir=bisenet_paths["test_mask_dir"],
+                test_img_dir=app_test_img_dir,
+                test_mask_dir=app_test_mask_dir,
                 class_names=bisenet_cfg["class_names"],
                 input_size=bisenet_cfg.get("test_size"),
                 build_model=make_bisenet,
@@ -346,8 +348,8 @@ class FoodSegDemoService:
                 label="BiSeNetV1 v4 (FoodSeg103)",
                 cfg=bisenet_v4_cfg,
                 checkpoint_path=(bisenet_v4_paths["work_dir"] / "bisenet_v4.pth"),
-                test_img_dir=bisenet_v4_paths["test_img_dir"],
-                test_mask_dir=bisenet_v4_paths["test_mask_dir"],
+                test_img_dir=app_test_img_dir,
+                test_mask_dir=app_test_mask_dir,
                 class_names=bisenet_v4_cfg["class_names"],
                 input_size=bisenet_v4_cfg.get("test_size"),
                 build_model=make_bisenet,
@@ -357,8 +359,8 @@ class FoodSegDemoService:
                 label="CCNet-ResNet50 (FoodSeg103)",
                 cfg=ccnet_cfg,
                 checkpoint_path=ccnet_checkpoint,
-                test_img_dir=ccnet_paths["test_img_dir"],
-                test_mask_dir=ccnet_paths["test_mask_dir"],
+                test_img_dir=app_test_img_dir,
+                test_mask_dir=app_test_mask_dir,
                 class_names=ccnet_cfg["class_names"],
                 input_size=ccnet_cfg.get("eval_size"),
                 build_model=make_ccnet,
