@@ -2,7 +2,8 @@
 
 This module builds and launches a Gradio Blocks interface that allows users to:
 
-* Select between different segmentation models (BiSeNetV1, BiSeNetV1 v4, CCNet).
+* Select between different segmentation models (BiSeNet-RTB + GNN, BiSeNetV1 v4).
+* Click a visual gallery of test images to choose input (without filename labels).
 * Upload images or videos for inference.
 * Visualise overlaid segmentation masks, per-class pixel distributions,
   confidence metrics, and timing breakdowns.
@@ -467,8 +468,18 @@ def build_demo() -> gr.Blocks:
     service = FoodSegDemoService()
     model_labels = service.get_model_labels()
     default_model = service.get_default_model_label()
-    test_images = service.get_test_image_choices()
-    default_test_image = service.get_default_test_image()
+
+    test_image_names = service.get_test_image_choices()
+    test_gallery_items: list[str] = []
+    test_gallery_names: list[str] = []
+    test_img_dir = ROOT / "app" / "test" / "img"
+    for image_name in test_image_names:
+        image_path = test_img_dir / image_name
+        if image_path.exists():
+            test_gallery_items.append(str(image_path))
+            test_gallery_names.append(image_name)
+
+    default_test_image = test_gallery_names[0] if test_gallery_names else None
 
     with gr.Blocks(
         title="FoodSeg103 Gradio Demo",
@@ -507,14 +518,30 @@ def build_demo() -> gr.Blocks:
 
         model_dropdown.change(service.describe_model, inputs=model_dropdown, outputs=model_info)
 
+        # ── Test image gallery (click to select, no filename shown) ──
+        gr.Markdown("### Chọn ảnh test bằng cách click vào ảnh")
+        test_gallery_names_state = gr.State(test_gallery_names)
+        selected_test_image = gr.State(default_test_image)
+
+        test_gallery = gr.Gallery(
+            value=test_gallery_items,
+            label="",
+            show_label=False,
+            columns=[6],
+            rows=[2],
+            object_fit="cover",
+            height=220,
+            elem_classes=["panel"],
+        )
+
         # ── Advanced options ──
         with gr.Accordion("Advanced options", open=False):
             with gr.Row(equal_height=True):
-                selected_test_image = gr.Dropdown(
-                    choices=test_images,
-                    value=default_test_image,
-                    label="Built-in test image",
-                    info="Uploaded files take priority over the selected test image.",
+                uploaded_image = gr.Image(
+                    type="filepath",
+                    sources=["upload"],
+                    label="Upload custom image (optional)",
+                    height=180,
                     scale=1,
                 )
                 checkpoint_override = gr.Textbox(
@@ -523,19 +550,11 @@ def build_demo() -> gr.Blocks:
                     scale=1,
                 )
 
-        # ── Upload area: sub-tabs for Image vs Video ──
-        with gr.Tab("\U0001f4f7 Upload Image"):
-            uploaded_image = gr.File(
-                file_types=["image"], type="filepath",
-                label="Upload an image file",
-                height=120,
-                
-            )
-        with gr.Tab("\U0001f3ac Upload Video"):
-            uploaded_video = gr.Video(
-                label="Upload a video file",
-                elem_classes=["panel"],
-            )
+        # ── Video upload (optional) ──
+        uploaded_video = gr.Video(
+            label="Upload video (optional)",
+            elem_classes=["panel"],
+        )
 
         run_btn = gr.Button("\u25b6 Run Inference", variant="primary", size="lg")
 
@@ -558,6 +577,23 @@ def build_demo() -> gr.Blocks:
         timing_html = gr.HTML()
 
         # ── Inference logic ──
+        def _select_test_image(evt: gr.SelectData, names: list[str]) -> str | None:
+            idx = evt.index
+            if isinstance(idx, (tuple, list)):
+                idx = idx[0]
+            if idx is None:
+                return None
+            idx = int(idx)
+            if idx < 0 or idx >= len(names):
+                return None
+            return names[idx]
+
+        test_gallery.select(
+            fn=_select_test_image,
+            inputs=[test_gallery_names_state],
+            outputs=[selected_test_image],
+        )
+
         def _run_inference(
             model_label, sel_test_img, img_file, video_file,
             ckpt_override, alpha,

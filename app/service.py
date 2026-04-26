@@ -8,6 +8,7 @@ and result formatting (overlays, metrics, timing).
 from __future__ import annotations
 
 import colorsys
+import json
 import os
 import sys
 import tempfile
@@ -28,12 +29,15 @@ if str(ROOT) not in sys.path:
 
 from configs.bisenet_foodseg103 import CFG as BISENET_CFG
 from configs.bisenet_foodseg103 import get_paths as get_bisenet_paths
-from configs.ccnet_foodseg103 import CFG as CCNET_CFG
-from configs.ccnet_foodseg103 import get_paths as get_ccnet_paths
-from datasets.foodseg103_ccnet import IMG_EXTS, load_class_mapping, resolve_dataset_meta
+from configs.bisenet_rtb_foodseg103 import CFG as BISENET_RTB_CFG
+from configs.bisenet_rtb_foodseg103 import get_paths as get_bisenet_rtb_paths
+from models.bisenet_rtb import BiSeNetRTB
+from models.builder import build_backbone
 from models.builder import build_model as build_bisenet_model
-from models.ccnet import CCNetSeg
 from utils.metrics import compute_segmentation_scores, fast_hist
+
+
+IMG_EXTS = [".jpg", ".jpeg", ".png", ".bmp", ".webp"]
 
 
 def _to_path(value: Any) -> Path | None:
@@ -51,6 +55,69 @@ def _to_path(value: Any) -> Path | None:
             if candidate:
                 return Path(candidate)
     return None
+
+
+def _load_class_mapping(
+    data_root: Path,
+    mapping_name: str,
+    fallback_num_classes: int,
+    fallback_background_id: int,
+    fallback_num_ingredient_classes: int,
+) -> dict[str, Any]:
+    """Load class mapping metadata and provide robust fallbacks."""
+    mapping_path = data_root / mapping_name
+
+    num_classes = int(fallback_num_classes)
+    background_id = int(fallback_background_id)
+    num_ingredient_classes = int(fallback_num_ingredient_classes)
+    class_names: list[str] = [f"class_{idx}" for idx in range(num_classes)]
+
+    if mapping_path.exists():
+        with open(mapping_path, "r", encoding="utf-8") as f:
+            mapping = json.load(f)
+
+        background_id = int(mapping.get("background_id", background_id))
+        num_ingredient_classes = int(
+            mapping.get("num_ingredient_classes", num_ingredient_classes)
+        )
+
+        ids: list[int] = []
+        id_to_class = mapping.get("id_to_class", {})
+        for raw_idx, class_name in id_to_class.items():
+            idx = int(raw_idx)
+            ids.append(idx)
+            if idx >= len(class_names):
+                class_names.extend(
+                    f"class_{extra_idx}"
+                    for extra_idx in range(len(class_names), idx + 1)
+                )
+            class_names[idx] = str(class_name)
+
+        class_to_id = mapping.get("class_to_id", {})
+        ids.extend(int(idx) for idx in class_to_id.values())
+        ids.append(background_id)
+
+        num_classes = max(
+            max(ids) + 1 if ids else num_classes,
+            num_ingredient_classes + 1,
+            background_id + 1,
+        )
+
+        if len(class_names) < num_classes:
+            class_names.extend(
+                f"class_{idx}" for idx in range(len(class_names), num_classes)
+            )
+
+    if 0 <= background_id < len(class_names):
+        class_names[background_id] = "background"
+
+    return {
+        "mapping_path": str(mapping_path) if mapping_path.exists() else None,
+        "num_classes": num_classes,
+        "background_id": background_id,
+        "num_ingredient_classes": num_ingredient_classes,
+        "class_names": class_names[:num_classes],
+    }
 
 
 def _safe_float(value: float, digits: int = 4) -> float:
@@ -193,6 +260,27 @@ def _load_checkpoint_flexible(
     }
 
 
+def _load_graph_prior(path: Path | None, num_classes: int) -> torch.Tensor:
+    """Load an RTB graph prior tensor, falling back to identity when unavailable."""
+    if path is None or not path.exists():
+        return torch.eye(num_classes, dtype=torch.float32)
+
+    try:
+        obj = torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        obj = torch.load(path, map_location="cpu")
+
+    if isinstance(obj, dict):
+        for key in ("prior", "graph_prior"):
+            prior = obj.get(key)
+            if torch.is_tensor(prior):
+                return prior.float()
+    if torch.is_tensor(obj):
+        return obj.float()
+
+    raise ValueError(f"Unsupported graph prior format: {path}")
+
+
 def _autocast_context(device: str, amp_enabled: bool):
     """Return a mixed-precision autocast context if applicable, else a no-op."""
     if device.startswith("cuda") and amp_enabled and torch.cuda.is_available():
@@ -286,13 +374,13 @@ class FoodSegDemoService:
         self._loaded_models: dict[tuple[str, str], LoadedModel] = {}
 
     def _build_presets(self) -> dict[str, ModelPreset]:
-        """Create :class:`ModelPreset` entries for BiSeNet variants and CCNet."""
+        """Create :class:`ModelPreset` entries for BiSeNet variants."""
         def prepare_bisenet_cfg(work_dir: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
             cfg = BISENET_CFG.copy()
             if work_dir is not None:
                 cfg["work_dir"] = work_dir
             paths = get_bisenet_paths(cfg)
-            mapping = load_class_mapping(
+            mapping = _load_class_mapping(
                 data_root=Path(cfg["data_root"]),
                 mapping_name="class_mapping.json",
                 fallback_num_classes=cfg["num_classes"],
@@ -302,46 +390,61 @@ class FoodSegDemoService:
             cfg.update(mapping)
             return cfg, paths
 
-        bisenet_cfg, bisenet_paths = prepare_bisenet_cfg("work_dirs/bisenet_rtb")
+        def prepare_rtb_cfg() -> tuple[dict[str, Any], dict[str, Any]]:
+            cfg = BISENET_RTB_CFG.copy()
+            cfg["work_dir"] = "work_dirs/bisenet_rtb"
+            cfg["save_best_name"] = "best_miou_rtb.pth"
+            cfg["graph_prior_path"] = "work_dirs/graph_prior_104.pt"
+            paths = get_bisenet_rtb_paths(cfg)
+            mapping = _load_class_mapping(
+                data_root=Path(cfg["data_root"]),
+                mapping_name="class_mapping.json",
+                fallback_num_classes=cfg["num_classes"],
+                fallback_background_id=cfg["background_id"],
+                fallback_num_ingredient_classes=cfg["num_classes"] - 1,
+            )
+            cfg.update(mapping)
+            return cfg, paths
+
+        bisenet_rtb_cfg, bisenet_rtb_paths = prepare_rtb_cfg()
         bisenet_v4_cfg, bisenet_v4_paths = prepare_bisenet_cfg("work_dirs/bisenet_v4")
         app_test_img_dir = self.root / "app" / "test" / "img"
         app_test_mask_dir = self.root / "app" / "test" / "mask"
-
-        ccnet_cfg = resolve_dataset_meta(CCNET_CFG.copy())
-        ccnet_paths = get_ccnet_paths(ccnet_cfg)
-        ccnet_candidates = [
-            ccnet_paths["work_dir"] / ccnet_cfg["save_best_name"],
-            self.root / "work_dirs" / "ccnet_report_smoke" / ccnet_cfg["save_best_name"],
-        ]
-        ccnet_checkpoint = next((path for path in ccnet_candidates if path.exists()), None)
 
         def make_bisenet(cfg: dict[str, Any]) -> torch.nn.Module:
             model_cfg = cfg.copy()
             return build_bisenet_model(model_cfg, get_bisenet_paths(model_cfg))
 
-        def make_ccnet(cfg: dict[str, Any]) -> torch.nn.Module:
-            return CCNetSeg(
-                num_classes=cfg["num_classes"],
-                backbone_pretrained=False,
-                output_stride=cfg["output_stride"],
-                channels=cfg["cc_channels"],
-                recurrence=cfg["cc_recurrence"],
-                use_aux=cfg["use_aux_head"],
-                dropout=cfg["dropout"],
-                align_corners=cfg["align_corners"],
+        def make_bisenet_rtb(cfg: dict[str, Any]) -> torch.nn.Module:
+            model_cfg = cfg.copy()
+            paths = get_bisenet_rtb_paths(model_cfg)
+            graph_prior_path = _to_path(model_cfg.get("graph_prior_path"))
+            if graph_prior_path is not None and not graph_prior_path.is_absolute():
+                graph_prior_path = (self.root / graph_prior_path).resolve()
+            graph_prior = _load_graph_prior(graph_prior_path, model_cfg["num_classes"])
+            return BiSeNetRTB(
+                num_classes=model_cfg["num_classes"],
+                backbone=build_backbone(model_cfg, paths),
+                background_id=model_cfg["background_id"],
+                graph_prior=graph_prior,
+                tex_ch=model_cfg["rtb_tex_ch"],
+                graph_dim=model_cfg["rtb_graph_dim"],
+                graph_layers=model_cfg["rtb_graph_layers"],
+                graph_eta=model_cfg["rtb_graph_eta"],
+                graph_xi=model_cfg["rtb_graph_xi"],
             )
 
         presets = {
             "bisenet": ModelPreset(
                 key="bisenet",
-                label="BiSeNetV1 RTB (FoodSeg103)",
-                cfg=bisenet_cfg,
-                checkpoint_path=(bisenet_paths["work_dir"] / bisenet_cfg["save_best_name"]),
+                label="BiSeNet-RTB + GNN (FoodSeg103)",
+                cfg=bisenet_rtb_cfg,
+                checkpoint_path=(bisenet_rtb_paths["work_dir"] / bisenet_rtb_cfg["save_best_name"]),
                 test_img_dir=app_test_img_dir,
                 test_mask_dir=app_test_mask_dir,
-                class_names=bisenet_cfg["class_names"],
-                input_size=bisenet_cfg.get("test_size"),
-                build_model=make_bisenet,
+                class_names=bisenet_rtb_cfg["class_names"],
+                input_size=bisenet_rtb_cfg.get("test_size"),
+                build_model=make_bisenet_rtb,
             ),
             "bisenet_v4": ModelPreset(
                 key="bisenet_v4",
@@ -354,24 +457,13 @@ class FoodSegDemoService:
                 input_size=bisenet_v4_cfg.get("test_size"),
                 build_model=make_bisenet,
             ),
-            "ccnet": ModelPreset(
-                key="ccnet",
-                label="CCNet-ResNet50 (FoodSeg103)",
-                cfg=ccnet_cfg,
-                checkpoint_path=ccnet_checkpoint,
-                test_img_dir=app_test_img_dir,
-                test_mask_dir=app_test_mask_dir,
-                class_names=ccnet_cfg["class_names"],
-                input_size=ccnet_cfg.get("eval_size"),
-                build_model=make_ccnet,
-            ),
         }
         return presets
 
     def _index_test_samples(self) -> dict[str, dict[str, Path]]:
         """Scan the test-set directories and build an image-name → path mapping."""
         samples: dict[str, dict[str, Path]] = {}
-        reference_preset = self.presets["ccnet"] if "ccnet" in self.presets else next(iter(self.presets.values()))
+        reference_preset = next(iter(self.presets.values()))
         if not reference_preset.test_img_dir.exists() or not reference_preset.test_mask_dir.exists():
             return samples
 
@@ -422,6 +514,7 @@ class FoodSegDemoService:
         return (
             f"**Model:** `{preset.label}`\n\n"
             f"- Default checkpoint: `{checkpoint_text}`\n"
+            f"- Graph prior: `{preset.cfg.get('graph_prior_path', 'not used')}`\n"
             f"- Device: `{preset.cfg['device']}`\n"
             f"- Inference size: `{size_text}`\n"
             f"- Classes: `{preset.cfg['num_classes']}`"

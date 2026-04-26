@@ -98,6 +98,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--project-root", type=str, default=None)
     parser.add_argument("--init-checkpoint", type=str, default=None)
     parser.add_argument("--graph-prior", type=str, default=None)
+    parser.add_argument(
+        "--allow-identity-prior",
+        action="store_true",
+        help="Allow fallback to identity graph prior when no prior file is found.",
+    )
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
@@ -146,6 +151,8 @@ def get_runtime_cfg(args: argparse.Namespace) -> Dict[str, Any]:
         cfg["init_checkpoint"] = args.init_checkpoint
     if args.graph_prior is not None:
         cfg["graph_prior_path"] = args.graph_prior
+    if args.allow_identity_prior:
+        cfg["require_graph_prior"] = False
     if args.lr is not None:
         cfg["lr"] = args.lr
     if args.resume:
@@ -339,28 +346,137 @@ def load_graph_prior(cfg: Dict[str, Any]) -> torch.Tensor:
     """Load graph prior from disk or return identity prior if unavailable."""
     path = cfg.get("graph_prior_path")
     num_classes = cfg["num_classes"]
+    require_prior = bool(cfg.get("require_graph_prior", True))
 
-    if path is None or str(path).strip() == "":
-        print("[WARN] graph_prior_path is empty. Using identity prior.")
+    def _dedupe(paths: list[Path]) -> list[Path]:
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for candidate in paths:
+            key = str(candidate)
+            if key not in seen:
+                unique.append(candidate)
+                seen.add(key)
+        return unique
+
+    def _torch_load(path_like: Path):
+        try:
+            return torch.load(path_like, map_location="cpu", weights_only=False)
+        except TypeError:
+            return torch.load(path_like, map_location="cpu")
+
+    candidates: list[Path] = []
+
+    if path is not None and str(path).strip() != "":
+        raw = Path(path)
+        candidates.append(raw)
+        if not raw.is_absolute():
+            candidates.append(ROOT / raw)
+            project_root = cfg.get("project_root")
+            if project_root is not None and str(project_root).strip() != "":
+                candidates.append(Path(project_root) / raw)
+
+    candidates.extend(
+        [
+            ROOT / "work_dirs" / "graph_prior_104.pt",
+            ROOT / "processed" / "metadata" / "graph_prior_104.pt",
+            ROOT / "datasets" / "processed" / "metadata" / "graph_prior_104.pt",
+        ]
+    )
+
+    candidates = _dedupe(candidates)
+
+    resolved: Path | None = None
+    for candidate in candidates:
+        if candidate.exists():
+            resolved = candidate
+            break
+
+    if resolved is None:
+        message = (
+            "Graph prior file not found. Checked: "
+            + ", ".join(str(p) for p in candidates)
+        )
+        if require_prior:
+            raise FileNotFoundError(message)
+        print(f"[WARN] {message}. Using identity prior.")
         return torch.eye(num_classes, dtype=torch.float32)
 
-    path = Path(path)
-    if not path.exists():
-        print(f"[WARN] graph prior not found: {path}. Using identity prior.")
-        return torch.eye(num_classes, dtype=torch.float32)
+    cfg["graph_prior_path"] = str(resolved)
+    print(f"Loaded graph prior from: {resolved}")
 
-    obj = torch.load(path, map_location="cpu")
+    obj = _torch_load(resolved)
+
+    prior_meta = {}
+    if isinstance(obj, dict):
+        if "num_classes" in obj:
+            prior_meta["num_classes"] = int(obj["num_classes"])
+        if "background_id" in obj:
+            prior_meta["background_id"] = int(obj["background_id"])
+        if "ignore_index" in obj:
+            prior_meta["ignore_index"] = int(obj["ignore_index"])
+
+    if "num_classes" in prior_meta and prior_meta["num_classes"] != int(cfg["num_classes"]):
+        raise ValueError(
+            "Graph prior num_classes mismatch: "
+            f"prior={prior_meta['num_classes']} cfg={cfg['num_classes']}"
+        )
+
+    if "background_id" in prior_meta and prior_meta["background_id"] != int(cfg["background_id"]):
+        raise ValueError(
+            "Graph prior background_id mismatch: "
+            f"prior={prior_meta['background_id']} cfg={cfg['background_id']}"
+        )
+
+    if "ignore_index" in prior_meta and prior_meta["ignore_index"] != int(cfg["ignore_index"]):
+        print(
+            "[WARN] Graph prior ignore_index differs from config: "
+            f"prior={prior_meta['ignore_index']} cfg={cfg['ignore_index']}"
+        )
 
     if isinstance(obj, dict):
         if "prior" in obj:
-            return obj["prior"].float()
-        if "graph_prior" in obj:
-            return obj["graph_prior"].float()
+            prior = obj["prior"].float()
+        elif "graph_prior" in obj:
+            prior = obj["graph_prior"].float()
+        else:
+            raise ValueError(f"Unsupported graph prior dict format: {resolved}")
+    elif torch.is_tensor(obj):
+        prior = obj.float()
+    else:
+        raise ValueError(f"Unsupported graph prior format: {resolved}")
 
-    if torch.is_tensor(obj):
-        return obj.float()
+    if prior.shape != (num_classes, num_classes):
+        raise ValueError(
+            f"graph_prior must have shape {(num_classes, num_classes)}, "
+            f"got {tuple(prior.shape)} from {resolved}"
+        )
 
-    raise ValueError(f"Unsupported graph prior format: {path}")
+    prior = torch.nan_to_num(prior, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
+
+    row_sum = prior.sum(dim=1, keepdim=True)
+    zero_rows = torch.nonzero(row_sum.squeeze(1) <= 1e-12, as_tuple=False).flatten()
+    if zero_rows.numel() > 0:
+        prior[zero_rows, :] = 0.0
+        prior[zero_rows, zero_rows] = 1.0
+
+    if 0 <= int(cfg["background_id"]) < num_classes:
+        bg = int(cfg["background_id"])
+        prior[bg, :] = 0.0
+        prior[:, bg] = 0.0
+        prior[bg, bg] = 1.0
+
+    prior = prior / prior.sum(dim=1, keepdim=True).clamp_min(1e-6)
+
+    row_sum = prior.sum(dim=1)
+    print(
+        "Graph prior stats | "
+        f"shape={tuple(prior.shape)} "
+        f"min={float(prior.min()):.6f} "
+        f"max={float(prior.max()):.6f} "
+        f"row_sum=[{float(row_sum.min()):.6f}, {float(row_sum.max()):.6f}]"
+    )
+
+    return prior
 
 
 def build_model_and_optim(

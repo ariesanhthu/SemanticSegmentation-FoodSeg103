@@ -25,6 +25,7 @@ CFG = {
     ),
     "train_stage": os.getenv("TRAIN_STAGE", "full"),
     "init_checkpoint": os.getenv("INIT_CHECKPOINT", None),
+    "min_init_checkpoint_coverage": float(os.getenv("MIN_INIT_CKPT_COVERAGE", 0.2)),
     "train_img_dir": "train/img",
     "train_mask_dir": "train/mask",
     "test_img_dir": "test/img",
@@ -36,8 +37,9 @@ CFG = {
     # RTB model
     "graph_prior_path": os.getenv(
         "GRAPH_PRIOR_PATH",
-        "datasets/processed/metadata/graph_prior_104.pt",
+        "work_dirs/graph_prior_104.pt",
     ),
+    "require_graph_prior": os.getenv("REQUIRE_GRAPH_PRIOR", "true").lower() == "true",
     "rtb_tex_ch": int(os.getenv("RTB_TEX_CH", 64)),
     "rtb_graph_dim": int(os.getenv("RTB_GRAPH_DIM", 128)),
     "rtb_graph_layers": int(os.getenv("RTB_GRAPH_LAYERS", 2)),
