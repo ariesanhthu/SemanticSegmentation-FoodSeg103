@@ -350,6 +350,22 @@ def build_datasets(
     eval_ds = FoodSegDataset(test_samples, eval_tf)
 
     if cfg.get("manifest"):
+        overfit_n = cfg.get("overfit_samples", 0)
+
+        if overfit_n > 0:
+            print("=" * 80)
+            print(f"OVERFIT MODE ENABLED on manifest: {overfit_n} samples")
+            print("=" * 80)
+
+            # Debug overfit: bỏ augmentation random để test pipeline có học thuộc không
+            train_tf = EvalTransform(
+                mean=cfg["imagenet_mean"],
+                std=cfg["imagenet_std"],
+                ignore_index=cfg["ignore_index"],
+                num_classes=cfg["num_classes"],
+                out_size=cfg["train_size"],
+            )
+
         train_ds = FoodSegManifestDataset(
             manifest_csv=cfg["manifest"],
             data_root=cfg["data_root"],
@@ -357,13 +373,18 @@ def build_datasets(
             transform=train_tf,
         )
 
-        overfit_n = cfg.get("overfit_samples", 0)
         if overfit_n > 0:
-            print("=" * 80)
-            print(f"OVERFIT MODE ENABLED on manifest: {overfit_n} samples")
-            print("=" * 80)
+            # Train đúng 8 sample từ manifest sau khi filter stage
             train_ds.df = train_ds.df.head(overfit_n).copy()
-            eval_ds = train_ds
+
+            # Eval cũng đúng 8 sample đó, nhưng dùng eval transform riêng
+            eval_ds = FoodSegManifestDataset(
+                manifest_csv=cfg["manifest"],
+                data_root=cfg["data_root"],
+                train_stage=cfg.get("train_stage", "easy"),
+                transform=eval_tf,
+            )
+            eval_ds.df = train_ds.df.copy()
     else:
         train_samples = build_samples(paths["train_img_dir"], paths["train_mask_dir"])
 
