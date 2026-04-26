@@ -2,7 +2,11 @@
 
 This module builds and launches a Gradio Blocks interface that allows users to:
 
+<<<<<<< HEAD
 * Select between different segmentation models (BiSeNetV1, BiSeNetV1 v4, CCNet).
+=======
+* Select between different segmentation models (BiSeNetV1, CCNet).
+>>>>>>> 4b2263ec99bfd68c12e9df2ee5b7100f626d0ed2
 * Upload images or videos for inference.
 * Visualise overlaid segmentation masks, per-class pixel distributions,
   confidence metrics, and timing breakdowns.

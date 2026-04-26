@@ -286,6 +286,7 @@ class FoodSegDemoService:
         self._loaded_models: dict[tuple[str, str], LoadedModel] = {}
 
     def _build_presets(self) -> dict[str, ModelPreset]:
+<<<<<<< HEAD
         """Create :class:`ModelPreset` entries for BiSeNet variants and CCNet."""
         def prepare_bisenet_cfg(work_dir: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
             cfg = BISENET_CFG.copy()
@@ -304,6 +305,19 @@ class FoodSegDemoService:
 
         bisenet_cfg, bisenet_paths = prepare_bisenet_cfg()
         bisenet_v4_cfg, bisenet_v4_paths = prepare_bisenet_cfg("work_dirs/bisenet_v4")
+=======
+        """Create :class:`ModelPreset` entries for BiSeNet and CCNet."""
+        bisenet_cfg = BISENET_CFG.copy()
+        bisenet_paths = get_bisenet_paths(bisenet_cfg)
+        mapping = load_class_mapping(
+            data_root=Path(bisenet_cfg["data_root"]),
+            mapping_name="class_mapping.json",
+            fallback_num_classes=bisenet_cfg["num_classes"],
+            fallback_background_id=bisenet_cfg["background_id"],
+            fallback_num_ingredient_classes=bisenet_cfg["num_classes"] - 1,
+        )
+        bisenet_cfg.update(mapping)
+>>>>>>> 4b2263ec99bfd68c12e9df2ee5b7100f626d0ed2
 
         ccnet_cfg = resolve_dataset_meta(CCNET_CFG.copy())
         ccnet_paths = get_ccnet_paths(ccnet_cfg)

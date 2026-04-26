@@ -28,8 +28,12 @@ CFG = {
     # ---------------------------------------------------------------------
     "project_root": os.getenv("PROJECT_ROOT", "."),
     "data_root": os.getenv("DATA_ROOT", "datasets/foodseg103-full"),
+<<<<<<< HEAD
     "manifest": os.getenv("TRAIN_MANIFEST", "datasets/processed/metadata/sample_training_mapping.csv"),
     "train_stage": os.getenv("TRAIN_STAGE", "easy"),
+=======
+    "manifest": os.getenv("TRAIN_MANIFEST", None),
+>>>>>>> 4b2263ec99bfd68c12e9df2ee5b7100f626d0ed2
     "init_checkpoint": os.getenv("INIT_CHECKPOINT", None),
     "train_img_dir": "train/img",
     "train_mask_dir": "train/mask",
