@@ -2,6 +2,11 @@
 
 Dự án nghiên cứu và triển khai phân đoạn hình ảnh thực phẩm (Food Segmentation) sử dụng các kiến trúc mạng nơ-ron hiệu quả như **BiSeNetV1** và **CCNet**.
 
+## 📦 Dataset & Checkpoints
+
+Tải tại: [Google Drive](https://drive.google.com/drive/folders/1CHdDO-6Xh1uiY8Cu1E7-L_6Arwmb8Zpm?usp=sharing)
+
+
 ## 🚀 Quick Start (Chạy Demo)
 
 Để chạy ứng dụng demo Gradio trên máy cục bộ:
